@@ -1,0 +1,11 @@
+C_ID	LogS	smiles_canon
+A-51	-5.54	O=C1c2ccccc2C(=O)c2c(Cl)cccc21
+A-53	-1.98497	NC(N)=NS(=O)(=O)c1ccc(N)cc1
+A-55	-3.912	CCC1C(N)CN1c1cc2c(cc1F)c(=O)c(C(=O)O)cn2C1CC1
+A-60	-3.656	CCC1(CC)OC(=O)c2cc([N+](=O)[O-])ccc21
+A-68	-2.937	O=C1C=Cc2ccccc2C1=NO
+A-73	-2.6	Cc1c(C(=O)O)cc([N+](=O)[O-])cc1[N+](=O)[O-]
+A-94	-5.324	NC1CN(c2cc3c(cc2F)c(=O)c(C(=O)O)cn3C2CC2)C1
+A-142	-1.795	CC1(C)NC(=O)N(Cc2ccccc2)C1=O
+A-158	-1.959	COCOc1ccc2c3c1OC1C(O)CCC4C(C2)N(C)CCC341
+A-191	-6.042	Nc1ccccc1C(=O)OCC=Cc1ccccc1

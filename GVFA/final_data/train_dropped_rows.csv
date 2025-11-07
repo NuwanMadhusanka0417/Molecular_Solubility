@@ -1,0 +1,9 @@
+row_index,smiles,reason
+6373,[Hg],single_atom_or_zero_bond
+11742,[As],single_atom_or_zero_bond
+12412,[Cl-].[NH4+],single_atom_or_zero_bond
+13158,CC1=CC=C[NH+2]([O-])[CH-]1,sanitize_failed
+13186,O=C(O)C1=C[NH+2]([O-])[CH-]C=C1,sanitize_failed
+13248,[F-].[H+],single_atom_or_zero_bond
+13255,S,single_atom_or_zero_bond
+13278,N.N.[Cl-].[Cl-].[Pt+2],single_atom_or_zero_bond
