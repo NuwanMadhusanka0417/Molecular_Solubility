@@ -5,3 +5,5 @@ knowledge.md
 .vscode
 Documents
 GVFA\data\ZINC\*
+*pyc
+/my_exp/Script/__pycache__/*

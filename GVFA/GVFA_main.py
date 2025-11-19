@@ -1,3 +1,9 @@
+'''
+This code use 7 features of atoms as node features. 
+USe "sol" python environment 
+'''
+
+
 from src.create_graphs import create_graph_list
 from src.load_data import load_data
 from src.VSA_conversion import VSA_conversion

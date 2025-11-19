@@ -1,3 +1,9 @@
+'''
+This code use 8 features of atoms as node features. 
+USe "sol" python environment 
+'''
+
+
 from src.new_data_load import load_s2v_from_csv #EnrichedFromCSV
 from src.VSA_conversion import VSA_conversion
 from src.embeddings import getEmbedding
