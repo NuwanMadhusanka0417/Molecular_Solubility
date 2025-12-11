@@ -11,13 +11,15 @@ def project_node_features(g_list, original_feature_dim, new_dim):
     W = torch.randn(original_feature_dim, new_dim) / np.sqrt(new_dim)
     print("W : ", W.shape)
     # Project node features for each graph
+
+    print("g list item shape before : ", g_list[0].node_features.shape)
     for g in g_list:
         # Assuming g.node_features is a torch.Tensor
         if g.node_features is not None:
             # print(g.node_features)
             g.node_features  = torch.matmul(g.node_features, W)
-            # print(g.node_features.shape)
-
+            # print("new g.node_features : ",g.node_features.shape)
+    print("g list item shape after : ", g_list[0].node_features.shape)
     return g_list
 
 def VSA_conversion(g_list, new_dim=None):

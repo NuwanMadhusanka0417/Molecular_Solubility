@@ -3,7 +3,10 @@ from rdkit import Chem
 from rdkit.Chem import RWMol
 import networkx as nx
 from torch_geometric.data import Data
-
+from rdkit import RDLogger
+import pandas as pd, torch
+from torch_geometric.data import InMemoryDataset, Data
+import numpy as np
 def expand_atomic_features(data, mol):
     index_to_atomic_number = {0: 6, 1: 8, 2: 7, 3: 16, 4: 9}  
     num_nodes = data.x.shape[0]
@@ -300,3 +303,164 @@ def create_graph_list(dataset):
     g_list.append(S2VGraph(g = g, label= data.y, mol= mol, node_tags= node_tags, node_features=torch.tensor(node_features, dtype=torch.float32)))
     # break
   return g_list
+
+RDLogger.DisableLog("rdApp.*")
+# Map RDKit bond types to a single integer (edge_attr is 1D like ZINC prints)
+_BOND2ID = {
+    Chem.BondType.SINGLE: 0,
+    Chem.BondType.DOUBLE: 1,
+    Chem.BondType.TRIPLE: 2,
+    Chem.BondType.AROMATIC: 3,
+}
+
+def smiles_to_data(smi, yval):
+    mol = Chem.MolFromSmiles(smi)
+    if mol is None or mol.GetNumAtoms() == 0:
+        return None
+
+    # x: [num_nodes, 1] (long) — single integer per atom (e.g., atomic number)
+    x = torch.tensor([[a.GetAtomicNum()] for a in mol.GetAtoms()], dtype=torch.long)
+
+    # Edges (both directions) and 1D edge_attr (long)
+    src, dst, eattr = [], [], []
+    for b in mol.GetBonds():
+        u, v = b.GetBeginAtomIdx(), b.GetEndAtomIdx()
+        t = _BOND2ID.get(b.GetBondType(), 0)
+        # add both directions
+        src += [u, v]
+        dst += [v, u]
+        eattr += [t, t]
+
+    edge_index = torch.tensor([src, dst], dtype=torch.long)
+    edge_attr  = torch.tensor(eattr, dtype=torch.long)  # shape [E], same as ZINC print
+
+    # y: [1] (float)
+    y = torch.tensor([float(yval)], dtype=torch.float)
+
+    return Data(x=x, edge_index=edge_index, edge_attr=edge_attr, y=y)
+
+
+class ZINCLikeCSV(InMemoryDataset):
+    def __init__(self, csv_path, smiles_col="smiles_canon", target_col="LogS"):
+        df = pd.read_csv(csv_path)
+        super().__init__('.')
+        graphs = []
+        for smi, y in zip(df[smiles_col], df[target_col]):
+            g = smiles_to_data(smi, y)
+            if g is not None:
+                graphs.append(g)
+        self.data, self.slices = self.collate(graphs)
+
+def load_data():
+  dataset_test  = ZINCLikeCSV("final_data/final_unique_test.csv")
+  dataset_train  = ZINCLikeCSV("final_data/final_unique_train_fixed.csv")
+
+  return dataset_train, dataset_test #, gl_train, 
+
+def project_node_features(g_list, original_feature_dim, new_dim):
+    # Set a random seed for reproducibility
+    torch.manual_seed(0)
+    # Generate a random projection matrix
+    # R = np.random.randn(original_feature_dim, new_dim) / np.sqrt(new_dim)
+    # Initialize a random weight matrix for projection
+    W = torch.randn(original_feature_dim, new_dim) / np.sqrt(new_dim)
+    print("W : ", W.shape)
+    # Project node features for each graph
+
+    print("g list item shape before : ", g_list[0].node_features.shape)
+    for g in g_list:
+        # Assuming g.node_features is a torch.Tensor
+        if g.node_features is not None:
+            # print(g.node_features)
+            g.node_features  = torch.matmul(g.node_features, W)
+            # print("new g.node_features : ",g.node_features.shape)
+    print("g list item shape after : ", g_list[0].node_features.shape)
+    return g_list
+
+def VSA_conversion(g_list, new_dim=None):
+    # Add labels and edge_mat
+    for g in g_list:
+        g.neighbors = [[] for _ in range(len(g.g))]
+
+        # Build neighbors list
+        for i, j in g.g.edges():
+            g.neighbors[i].append(j)
+            g.neighbors[j].append(i)
+
+        # Compute max degree
+        degree_list = [len(g.neighbors[i]) for i in range(len(g.g))]
+        g.max_neighbor = max(degree_list)
+
+        # Create edge matrix
+        edges = [list(pair) for pair in g.g.edges()]
+        edges.extend([[j, i] for i, j in edges])
+        g.edge_mat = torch.LongTensor(edges).transpose(0, 1)
+
+    #Extracting unique tag labels
+    # tagset = set([])
+    # for g in g_list:
+    #     tagset = tagset.union(set(g.node_tags))
+
+    # tagset = list(tagset)
+    # tag2index = {tagset[i]:i for i in range(len(tagset))}
+
+
+    ########## This part make one hit encoding of each node as they contain different atoms
+    # for g in g_list:
+    #     g.node_features = torch.zeros(len(g.node_tags), len(tagset))
+    #     g.node_features[range(len(g.node_tags)), [tag2index[tag] for tag in g.node_tags]] = 1
+            # hypervector[range(len(g.node_tags)), [tag2index[tag] for tag in node_tags if tag in tag2index]] = 1
+
+    original_feature_dim = len(g_list[0].node_features[0])# len(tagset)
+    # print(len(tagset))
+    print("VSA_conversion",len(g_list[0].node_features[0]))
+
+
+    if new_dim:
+        g_list = project_node_features(g_list, original_feature_dim, new_dim)
+    return g_list
+
+def getEmbedding( model, device, train_graphs, batch_size=100, SUM = True):
+
+    model.to(device)
+    model.train()
+
+    combined_embeddings = []  # Initialize the total embedding
+    all_labels = []
+
+    # Create batches
+    num_graphs = len(train_graphs)
+    for start_idx in range(0, num_graphs, batch_size):
+        end_idx = min(start_idx + batch_size, num_graphs)
+        batch_graphs = train_graphs[start_idx:end_idx]
+        # print("getEmbedding :: Before BBBBB")
+        output = model(batch_graphs)
+        # print(output.shape)
+
+        ################### For regression taskuse TRUE and false both as sum ################
+
+        
+        if(SUM==True):    # allways use SUM
+            # Sum all embeddings
+            combined_embedding = output.sum(dim=0, keepdim=True)   #torch.sum(torch.stack(output), dim=0)  # Sum along the new batch dimension
+            # 100 tensors
+        else:
+            #Concat
+            combined_embedding = torch.cat(output, dim=1)
+        
+        # Add the summed embeddings of this batch to the total embedding
+        #############################################################################
+        # combined_embeddings.append(output) #combined_embedding)
+        combined_embeddings.append(combined_embedding)
+
+        ####################################Place conmvert label########
+        # Collect labels
+        labels = torch.FloatTensor([graph.label for graph in batch_graphs]).to(device)
+        all_labels.append(labels)
+
+
+    final_labels = torch.cat(all_labels, dim=0)
+    final_embeddings = torch.cat(combined_embeddings, dim=1)
+
+    # print("getEmbedding :: endo")
+    return final_embeddings, final_labels
