@@ -3,6 +3,202 @@ from rdkit import Chem
 from rdkit.Chem import RWMol
 import networkx as nx
 from torch_geometric.data import Data
+import numpy as np
+from rdkit.Chem import AllChem
+
+def bond_node_features_geognn(bond, pos):
+    """
+    Compute features for a single bond.
+
+    Parameters
+    ----------
+    bond : rdchem.Bond
+        RDKit bond object.
+    pos : np.ndarray
+        Array of atom positions with shape [num_atoms, 3].
+
+    Returns
+    -------
+    np.ndarray, shape [4]
+        [bond_type, is_conjugated, in_ring, bond_length]
+    """
+    bt = bond.GetBondType()
+    bond_type = {
+        Chem.rdchem.BondType.SINGLE: 1,
+        Chem.rdchem.BondType.DOUBLE: 2,
+        Chem.rdchem.BondType.TRIPLE: 3,
+        Chem.rdchem.BondType.AROMATIC: 4,
+    }.get(bt, 0)
+
+    is_conjugated = int(bond.GetIsConjugated())
+    in_ring = int(bond.IsInRing())
+
+    a = bond.GetBeginAtomIdx()
+    b = bond.GetEndAtomIdx()
+
+    # 3D bond length using positions in `pos`
+    length = float(np.linalg.norm(pos[a] - pos[b]))
+
+    return np.array([bond_type, is_conjugated, in_ring, length],
+                    dtype=np.float32)
+'''
+def build_edge_features_geognn_for_atom_graph(data, mol):
+    """
+    Use your existing bond_node_features_geognn(bond, pos)
+    to build edge_attr aligned with data.edge_index.
+
+    Returns: torch.FloatTensor [E, 4] or None if 3D embedding fails.
+    """
+    # Rebuild a clean SMILES → mol with Hs and 3D coords
+    smiles = Chem.MolToSmiles(mol)
+    mol3d = Chem.MolFromSmiles(smiles)
+    if mol3d is None:
+        return None
+
+    mol3d = Chem.AddHs(mol3d)
+
+    try:
+        params = AllChem.ETKDGv3()
+        params.randomSeed = 0xf00d
+        if AllChem.EmbedMolecule(mol3d, params) != 0:
+            return None
+        AllChem.MMFFOptimizeMolecule(mol3d)
+    except Exception:
+        return None
+
+    # 3D positions
+    conf = mol3d.GetConformer()
+    num_atoms = mol3d.GetNumAtoms()
+    pos = np.zeros((num_atoms, 3), dtype=np.float32)
+    for i in range(num_atoms):
+        p = conf.GetAtomPosition(i)
+        pos[i] = [p.x, p.y, p.z]
+
+    # Build edge features aligned with data.edge_index
+    E = data.edge_index.shape[1]
+    edge_feats = []
+
+    for e in range(E):
+        u = int(data.edge_index[0, e])
+        v = int(data.edge_index[1, e])
+
+        bond = mol3d.GetBondBetweenAtoms(u, v)
+        if bond is None:
+            edge_feats.append(np.zeros(4, dtype=np.float32))
+        else:
+            bf = bond_node_features_geognn(bond, pos)   # ⬅️ your working function
+            edge_feats.append(bf)
+
+    edge_attr = np.stack(edge_feats, axis=0)  # [E, 4]
+    return torch.from_numpy(edge_attr)        # float32
+
+
+def build_edge_features_geognn_for_atom_graph(data, mol):
+    """
+    Use bond_node_features_geognn(bond, pos) to build edge_attr
+    aligned with data.edge_index, preserving the original atom ordering.
+
+    Returns: torch.FloatTensor [E, 4] or None if 3D embedding fails.
+    """
+    # Copy the original mol to avoid modifying it in-place
+    mol3d = Chem.Mol(mol)
+
+    # Make sure the atom order stays the same; AddHs will append H atoms
+    mol3d = Chem.AddHs(mol3d)
+
+    # Generate 3D coordinates
+    try:
+        params = AllChem.ETKDGv3()
+        params.randomSeed = 0xf00d
+        if AllChem.EmbedMolecule(mol3d, params) != 0:
+            return None
+        AllChem.MMFFOptimizeMolecule(mol3d)
+    except Exception:
+        return None
+
+    # 3D positions
+    conf = mol3d.GetConformer()
+    num_atoms = mol3d.GetNumAtoms()
+    pos = np.zeros((num_atoms, 3), dtype=np.float32)
+    for i in range(num_atoms):
+        p = conf.GetAtomPosition(i)
+        pos[i] = [p.x, p.y, p.z]
+
+    # Build edge features aligned with data.edge_index
+    E = data.edge_index.shape[1]
+    edge_feats = []
+
+    for e in range(E):
+        u = int(data.edge_index[0, e])
+        v = int(data.edge_index[1, e])
+
+        bond = mol3d.GetBondBetweenAtoms(u, v)
+        if bond is None:
+            # If you expect ONLY chemical bonds in edge_index, this shouldn't happen.
+            # You can either assert or keep zeros as a fallback.
+            edge_feats.append(np.zeros(4, dtype=np.float32))
+        else:
+            bf = bond_node_features_geognn(bond, pos)
+            edge_feats.append(bf)
+
+    edge_attr = np.stack(edge_feats, axis=0)  # [E, 4]
+    return torch.from_numpy(edge_attr)
+'''
+
+def build_edge_features_geognn_for_atom_graph(data, mol):
+    """
+    Build edge_attr aligned with data.edge_index using your
+    bond_node_features_geognn(bond, pos).
+
+    Returns: torch.FloatTensor [E, 4] or None if 3D embedding fails.
+    """
+    # Use SMILES to get a clean, sanitized molecule
+    smiles = Chem.MolToSmiles(mol)
+    mol3d = Chem.MolFromSmiles(smiles)
+    if mol3d is None:
+        return None
+
+    # Add hydrogens and 3D coords (same as your working function)
+    try:
+        mol3d = Chem.AddHs(mol3d)
+
+        params = AllChem.ETKDGv3()
+        params.randomSeed = 0xf00d
+        if AllChem.EmbedMolecule(mol3d, params) != 0:
+            return None
+
+        AllChem.MMFFOptimizeMolecule(mol3d)
+    except Exception:
+        return None
+
+    # 3D positions
+    conf = mol3d.GetConformer()
+    num_atoms = mol3d.GetNumAtoms()
+    pos = np.zeros((num_atoms, 3), dtype=np.float32)
+    for i in range(num_atoms):
+        p = conf.GetAtomPosition(i)
+        pos[i] = [p.x, p.y, p.z]
+
+    # Build edge features aligned with data.edge_index
+    E = data.edge_index.shape[1]
+    edge_feats = []
+
+    for e in range(E):
+        u = int(data.edge_index[0, e])
+        v = int(data.edge_index[1, e])
+
+        bond = mol3d.GetBondBetweenAtoms(u, v)
+        if bond is None:
+            # If all edges are chemical bonds, this shouldn't happen.
+            # You can assert here to catch bugs:
+            # raise RuntimeError(f"No bond for edge ({u},{v})")
+            edge_feats.append(np.zeros(4, dtype=np.float32))
+        else:
+            bf = bond_node_features_geognn(bond, pos)  # your working function
+            edge_feats.append(bf)
+
+    edge_attr = np.stack(edge_feats, axis=0)  # [E, 4]
+    return torch.from_numpy(edge_attr)
 
 def expand_atomic_features(data, mol):
     index_to_atomic_number = {0: 6, 1: 8, 2: 7, 3: 16, 4: 9}  
@@ -197,6 +393,28 @@ def expand_atomic_features(data, mol):
                 chirality[i, 0] = 0.0
                 chirality[i, 1] = 1.0   # S
 
+    # ================== NEW: edge features → node features ==================
+    edge_attr = build_edge_features_geognn_for_atom_graph(data, mol)  # [E, 4] or None
+
+    if edge_attr is not None:
+        num_nodes = data.x.shape[0]
+        num_edges, edge_feat_dim = edge_attr.shape
+
+        node_edge_sum = torch.zeros((num_nodes, edge_feat_dim),
+                                    dtype=edge_attr.dtype)
+
+        for e in range(num_edges):
+            u, v = data.edge_index[:, e]
+            feat = edge_attr[e]
+            node_edge_sum[u] += feat
+            node_edge_sum[v] += feat
+
+        # mean over incident bonds; atoms with degree 0 just stay zeros
+        node_edge_mean = node_edge_sum / degrees.clamp(min=1.0)  # [N, 4]
+    else:
+        node_edge_mean = torch.zeros((num_nodes, 0), dtype=torch.float32)
+    # =======================================================================
+
 
 
     
@@ -205,6 +423,7 @@ def expand_atomic_features(data, mol):
                                    formal_charge,
                                     hbond_flags,
                                     chirality,
+                                    node_edge_mean,
                                     ), dim=1)
     # print("valence_electrons ", valence_electrons)
     # print("hybridization ", hybridization)
@@ -212,6 +431,9 @@ def expand_atomic_features(data, mol):
     # print("enhanced_features.shape : ",enhanced_features.shape)
     # print("atomic_numbers, degrees, valence_electrons, hybridization, aromaticity")
     # print("enhanced_features : ",enhanced_features)
+
+
+
 
     return enhanced_features
 

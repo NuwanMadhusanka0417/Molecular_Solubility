@@ -17,6 +17,8 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
 train_data, test_data = load_data()
 
+print(train_data[0].)
+
 train_graphs = create_graph_list(train_data)
 test_graphs = create_graph_list(test_data)
 
