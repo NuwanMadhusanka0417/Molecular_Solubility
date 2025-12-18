@@ -18,7 +18,7 @@ from xgboost import XGBRegressor
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from sklearn.preprocessing import StandardScaler
 from models.graphcnnVSA_Binding_FULL import GraphCNN
-from src import utilities
+# from src import utilities
 
 # from src.geaognn_all import load_data_geognn
 from src.geaognn_all import (
@@ -93,41 +93,45 @@ combined_test_atom_bond_geognn = torch.cat(
 )
 
 #######################   Traditional Feature set
+'''
+# train_set=pd.read_csv('final_data/final_unique_train_fixed.csv')
+# test_set=pd.read_csv('final_data/final_unique_test.csv')
 
-train_set=pd.read_csv('final_data/final_unique_train_fixed.csv')
-test_set=pd.read_csv('final_data/final_unique_test.csv')
-
-train_smiles_list=train_set[['smiles_canon']]
-test_smiles_list=test_set[['smiles_canon']]
+# train_smiles_list=train_set[['smiles_canon']]
+# test_smiles_list=test_set[['smiles_canon']]
 
 
-### Generate 4 descriptors ....
-df4_train=utilities.generate4(train_set.smiles_canon)
-df4_test=utilities.generate4(test_set.smiles_canon)
-### Generate 17 descriptors ....
-df17_train=utilities.generate17(train_set.smiles_canon)
-df17_test=utilities.generate17(test_set.smiles_canon)
-### Generate 123 descriptors ....'''
-df123_train=utilities.generate123(train_set.smiles_canon)
-df123_test=utilities.generate123(test_set.smiles_canon)
-### Generate 38 feature engineered based on the structure of the smiles ....
-df38_train=utilities.generate_features38(train_set.smiles_canon)
-df38_test=utilities.generate_features38(test_set.smiles_canon)
-### Generate 7 funnctional groups
-df7_train=utilities.get_functional_groups(train_set.smiles_canon)
-df7_test=utilities.get_functional_groups(test_set.smiles_canon)
-### Fingerprint 128....
-df128_train=utilities.fingerprint(train_set.smiles_canon,2,128)
-df128_test=utilities.fingerprint(test_set.smiles_canon,2,128)
+# ### Generate 4 descriptors ....
+# df4_train=utilities.generate4(train_set.smiles_canon)
+# df4_test=utilities.generate4(test_set.smiles_canon)
+# ### Generate 17 descriptors ....
+# df17_train=utilities.generate17(train_set.smiles_canon)
+# df17_test=utilities.generate17(test_set.smiles_canon)
+# ### Generate 123 descriptors ....
+# df123_train=utilities.generate123(train_set.smiles_canon)
+# df123_test=utilities.generate123(test_set.smiles_canon)
+# ### Generate 38 feature engineered based on the structure of the smiles ....
+# df38_train=utilities.generate_features38(train_set.smiles_canon)
+# df38_test=utilities.generate_features38(test_set.smiles_canon)
+# ### Generate 7 funnctional groups
+# df7_train=utilities.get_functional_groups(train_set.smiles_canon)
+# df7_test=utilities.get_functional_groups(test_set.smiles_canon)
+# ### Fingerprint 128....
+# df128_train=utilities.fingerprint(train_set.smiles_canon,2,128)
+# df128_test=utilities.fingerprint(test_set.smiles_canon,2,128)
 
-df298_train=pd.concat([df123_train, df128_train, df7_train, df38_train], axis=1)
-df298_test=pd.concat([df123_test, df128_test, df7_test, df38_test], axis=1)
+# df298_train=pd.concat([df123_train, df128_train, df7_train, df38_train], axis=1)
+# df298_test=pd.concat([df123_test, df128_test, df7_test, df38_test], axis=1)
 
-scaler_298 = StandardScaler()
-scaler_298.fit(df298_train.values) 
+# scaler_298 = StandardScaler()
+# scaler_298.fit(df298_train.values) 
 
-df298_train_scaled = scaler_298.transform(df298_train.values)
-df298_test_scaled  = scaler_298.transform(df298_test.values)
+# df298_train_scaled = scaler_298.transform(df298_train.values)
+# df298_test_scaled  = scaler_298.transform(df298_test.values)'''
+
+df298_train_scaled = np.load("data/X298_train_scaled.npy")   # shape [N_train, 298]
+df298_test_scaled  = np.load("data/X298_test_scaled.npy")    # shape [N_test, 298]
+
 
 df_torch_train = torch.from_numpy(df298_train_scaled.astype(np.float32))
 df_torch_test  = torch.from_numpy(df298_test_scaled.astype(np.float32))
