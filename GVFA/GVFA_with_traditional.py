@@ -84,10 +84,10 @@ df193_test=utilities.generate_desc_193(test_set.smiles_canon)
 df298_train=pd.concat([df123_train, df128_train, df7_train, df38_train], axis=1)
 df298_test=pd.concat([df123_test, df128_test, df7_test, df38_test], axis=1)
 
-HV_Dimentions = [100, 500, 1000, 2000, 5000, 10000]
+# HV_Dimentions = [100, 500, 1000, 2000, 5000, 10000]
 
 scaler_298 = StandardScaler()
-# scaler_298.fit(df298_train.values)   # each column: its own mean/std
+scaler_298.fit(df298_train.values)   # each column: its own mean/std
 
 
 # for HV_Dimention in HV_Dimentions:
