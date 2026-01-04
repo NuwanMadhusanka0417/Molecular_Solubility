@@ -149,6 +149,9 @@ for HV_dim in HV_dims:
     # X_train = pd.concat([df_t, train_embeddings_eq1], axis=1)
     combined_test_atom_geognn_trad = torch.cat([test_traditional, combined_test_atom_bond_geognn], axis=1)
 
+    combined_train_atom_trad = torch.cat([train_traditional, train_atom_bond], axis=1)
+    combined_test_atom_trad = torch.cat([test_traditional, test_atom_bond], axis=1)
+
 
     ######################################  Classifiers
     xgb = XGBRegressor(
@@ -178,6 +181,19 @@ for HV_dim in HV_dims:
     )
 
     xgb_all = XGBRegressor(
+        n_estimators=200,
+        learning_rate=0.03,
+        max_depth=7,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        reg_lambda=1.0,
+        reg_alpha=0.0,
+        random_state=42,
+        n_jobs=4,
+        tree_method="hist"   # fast on CPU; use "gpu_hist" if you have GPU
+    )
+
+    xgb_atom_trad = XGBRegressor(
         n_estimators=200,
         learning_rate=0.03,
         max_depth=7,
@@ -256,6 +272,28 @@ for HV_dim in HV_dims:
 
     print("MAE      RMSE      R2")
     print(mae,"     ",rmse, "       ",r2)
+
+
+    
+    ###################################    Clssify ATom-bond + traditional
+
+    xgb_atom_trad.fit(
+        combined_train_atom_trad, train_labels_geognn,
+        eval_set=[(combined_test_atom_trad, test_labels_geognn)],
+        # early_stopping_rounds=100,
+        verbose=False
+    )
+    pred = xgb.predict(combined_test_atom_bond_geognn)
+    rmse = mean_squared_error(test_labels_geognn, pred)
+    mae  = mean_absolute_error(test_labels_geognn, pred)
+    r2   = r2_score(test_labels_geognn, pred)
+
+    print("Dimention: ", HV_dim)
+    print("Atom-Bond + Traditional")
+
+    print("MAE      RMSE      R2")
+    print(mae,"     ",rmse, "       ",r2)
+    
 
     ###################################    Atom-bond + bond-angle + Tradisional
 
