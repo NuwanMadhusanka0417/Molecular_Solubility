@@ -145,7 +145,7 @@ print(X_train.shape)
 print(X_test.shape)
 
 xgb = XGBRegressor(
-    n_estimators=2000,
+    n_estimators=200,
     learning_rate=0.03,
     max_depth=7,
     subsample=0.8,
