@@ -37,7 +37,7 @@ from rdkit import RDLogger
 RDLogger.DisableLog('rdApp.*')
 from rdkit.Chem import MolStandardize
 import joblib
-from src import utilities
+# from src import utilities
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--hv_dim", type=int, required=True,
@@ -166,6 +166,14 @@ xgb.fit(
 
 pred_xgb = xgb.predict(X_test)
 
-xgb_298=utilities.get_errors1(test_labels_eq1,pred_xgb,f"XGB_298 concatinate GVFA({HV_Dimention})")
-xgb_298['Descriptors_Detail']='125 features + 128 fingerprint 7 f_group+38 fe features'
-print(xgb_298)
+# xgb_298=utilities.get_errors1(test_labels_eq1,pred_xgb,f"XGB_298 concatinate GVFA({HV_Dimention})")
+# xgb_298['Descriptors_Detail']='125 features + 128 fingerprint 7 f_group+38 fe features'
+# print(xgb_298)
+
+rmse = mean_squared_error(test_labels_eq1,pred_xgb)
+mae  = mean_absolute_error(test_labels_eq1,pred_xgb)
+r2   = r2_score(test_labels_eq1,pred_xgb)
+print("Dimention: ", HV_Dimention)
+print("Atom-Bond")
+print("MAE      RMSE      R2")
+print(mae,"     ",rmse, "       ",r2)
