@@ -412,7 +412,7 @@ def expand_atomic_features(data, mol):
         # mean over incident bonds; atoms with degree 0 just stay zeros
         node_edge_mean = node_edge_sum / degrees.clamp(min=1.0)  # [N, 4]
     else:
-        node_edge_mean = torch.zeros((num_nodes, 4), dtype=torch.float32)
+        node_edge_mean = torch.zeros((num_nodes, 0), dtype=torch.float32)
     # =======================================================================
 
 

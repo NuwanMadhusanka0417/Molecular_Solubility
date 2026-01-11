@@ -2,13 +2,13 @@
 import torch
 import numpy as np
 
-def project_node_features(g_list, original_feature_dim, new_dim):
+def project_node_features(g_list, original_feature_dim, new_dim, W):
     # Set a random seed for reproducibility
     torch.manual_seed(0)
     # Generate a random projection matrix
     # R = np.random.randn(original_feature_dim, new_dim) / np.sqrt(new_dim)
     # Initialize a random weight matrix for projection
-    W = torch.randn(original_feature_dim, new_dim) / np.sqrt(new_dim)
+    # W = torch.randn(original_feature_dim, new_dim) / np.sqrt(new_dim)
     print("W : ", W.shape)
     # Project node features for each graph
 
@@ -22,7 +22,7 @@ def project_node_features(g_list, original_feature_dim, new_dim):
     print("g list item shape after : ", g_list[0].node_features.shape)
     return g_list
 
-def VSA_conversion(g_list, new_dim=None):
+def VSA_conversion(g_list, new_dim=None, W=None):
     # Add labels and edge_mat
     for g in g_list:
         g.neighbors = [[] for _ in range(len(g.g))]
@@ -62,5 +62,6 @@ def VSA_conversion(g_list, new_dim=None):
 
 
     if new_dim:
-        g_list = project_node_features(g_list, original_feature_dim, new_dim)
+        # W = torch.randn(original_feature_dim, new_dim) / np.sqrt(new_dim)
+        g_list = project_node_features(g_list, original_feature_dim, new_dim, W)
     return g_list
