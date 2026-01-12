@@ -9,7 +9,7 @@ def project_node_features(g_list, original_feature_dim, new_dim):
     # R = np.random.randn(original_feature_dim, new_dim) / np.sqrt(new_dim)
     # Initialize a random weight matrix for projection
     W = torch.randn(original_feature_dim, new_dim) / np.sqrt(new_dim)
-    print("W : ", W.shape)
+    # print("W : ", W.shape)
     # Project node features for each graph
 
     print("g list item shape before : ", g_list[0].node_features.shape)

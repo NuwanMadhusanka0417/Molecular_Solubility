@@ -283,7 +283,7 @@ for HV_dim in HV_dims:
         # early_stopping_rounds=100,
         verbose=False
     )
-    pred = xgb.predict(combined_test_atom_bond_geognn)
+    pred = xgb_atom_trad.predict(combined_test_atom_trad)
     rmse = mean_squared_error(test_labels_geognn, pred)
     mae  = mean_absolute_error(test_labels_geognn, pred)
     r2   = r2_score(test_labels_geognn, pred)
