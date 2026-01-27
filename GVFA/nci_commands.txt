@@ -7,4 +7,6 @@ qsub -I  -l walltime=30:00:00,mem=100GB,ncpus=28,jobfs=50GB -P mi23 -l storage=g
 
 cd /g/data/jq77/nuwan/Molecular_Solubility/GVFA/
 
+vi src/create_graphs.py
+python3 GVFA_main.py
 python3 GVFA_with_traditional.py --hv_dim 2100

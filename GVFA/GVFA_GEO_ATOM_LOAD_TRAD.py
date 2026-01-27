@@ -155,7 +155,7 @@ for HV_dim in HV_dims:
 
     ######################################  Classifiers
     xgb = XGBRegressor(
-        n_estimators=200,
+        n_estimators=2000,
         learning_rate=0.03,
         max_depth=7,
         subsample=0.8,
@@ -168,7 +168,7 @@ for HV_dim in HV_dims:
     )
 
     xgb_geognn = XGBRegressor(
-        n_estimators=200,
+        n_estimators=2000,
         learning_rate=0.03,
         max_depth=7,
         subsample=0.8,
@@ -180,8 +180,8 @@ for HV_dim in HV_dims:
         tree_method="hist"   # fast on CPU; use "gpu_hist" if you have GPU
     )
 
-    xgb_all = XGBRegressor(
-        n_estimators=200,
+    xgb_atom_angle = XGBRegressor(
+        n_estimators=2000,
         learning_rate=0.03,
         max_depth=7,
         subsample=0.8,
@@ -194,7 +194,7 @@ for HV_dim in HV_dims:
     )
 
     xgb_atom_trad = XGBRegressor(
-        n_estimators=200,
+        n_estimators=2000,
         learning_rate=0.03,
         max_depth=7,
         subsample=0.8,
@@ -207,7 +207,7 @@ for HV_dim in HV_dims:
     )
 
     xgb_atom_angle_trad = XGBRegressor(
-        n_estimators=200,
+        n_estimators=2000,
         learning_rate=0.03,
         max_depth=7,
         subsample=0.8,
@@ -222,7 +222,7 @@ for HV_dim in HV_dims:
 
 
     ###################################    Clssify Atom - Bond
-    xgb.fit(
+    '''xgb.fit(
         train_atom_bond, train_labels_atom_bond,
         eval_set=[(test_atom_bond, test_labels_atom_bond)],
         # early_stopping_rounds=100,
@@ -235,7 +235,7 @@ for HV_dim in HV_dims:
     print("Dimention: ", HV_dim)
     print("Atom-Bond")
     print("MAE      RMSE      R2")
-    print(mae,"     ",rmse, "       ",r2)
+    print(mae,"     ",rmse, "       ",r2)'''
 
     ###################################    Clssify GEO
 
@@ -256,13 +256,13 @@ for HV_dim in HV_dims:
 
     ###################################    Clssify BOTH
 
-    xgb.fit(
+    xgb_atom_angle.fit(
         combined_train_atom_bond_geognn, train_labels_geognn,
         eval_set=[(combined_test_atom_bond_geognn, test_labels_geognn)],
         # early_stopping_rounds=100,
         verbose=False
     )
-    pred = xgb.predict(combined_test_atom_bond_geognn)
+    pred = xgb_atom_angle.predict(combined_test_atom_bond_geognn)
     rmse = mean_squared_error(test_labels_geognn, pred)
     mae  = mean_absolute_error(test_labels_geognn, pred)
     r2   = r2_score(test_labels_geognn, pred)
@@ -277,7 +277,7 @@ for HV_dim in HV_dims:
     
     ###################################    Clssify ATom-bond + traditional
 
-    xgb_atom_trad.fit(
+    '''xgb_atom_trad.fit(
         combined_train_atom_trad, train_labels_geognn,
         eval_set=[(combined_test_atom_trad, test_labels_geognn)],
         # early_stopping_rounds=100,
@@ -292,7 +292,7 @@ for HV_dim in HV_dims:
     print("Atom-Bond + Traditional")
 
     print("MAE      RMSE      R2")
-    print(mae,"     ",rmse, "       ",r2)
+    print(mae,"     ",rmse, "       ",r2)'''
     
 
     ###################################    Atom-bond + bond-angle + Tradisional
