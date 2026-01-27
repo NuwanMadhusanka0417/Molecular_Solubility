@@ -445,11 +445,13 @@ def VSA_conversion_geognn(g_list, new_dim=None, use_bond_x_if_none=True):
     # print("getEmbedding :: endo")
     return final_embeddings, final_labels'''
 
-def getEmbedding_geognn(model, device, graphs, batch_size=100):
+def getEmbedding_geognn(model, device, graphs, batch_size=100, layer_reduce="sum"):
     """
-    Returns:
-        embeddings: [N, D]
-        labels:     [N]
+    layer_reduce: "sum" | "mean" | "last" | "concat"
+      - "sum"   : sum over layers -> [B, D]
+      - "mean"  : mean over layers -> [B, D]
+      - "last"  : use last layer -> [B, D]
+      - "concat": concat layers into features -> [B, L*D]
     """
     model = model.to(device)
     model.eval()
@@ -460,16 +462,35 @@ def getEmbedding_geognn(model, device, graphs, batch_size=100):
     with torch.no_grad():
         for start in range(0, len(graphs), batch_size):
             batch = graphs[start:start + batch_size]
-            out = model(batch)
+            out = model(batch)  # GraphCNN gives [L, B, D]  (because of torch.stack over layers)
 
+            # Ensure tensor
             if isinstance(out, (list, tuple)):
                 out = torch.stack(out, dim=0)
+
+            # Reduce layer dimension so we ALWAYS store [B, D] or [B, L*D]
+            if out.dim() == 3:  # [L, B, D]
+                if layer_reduce == "sum":
+                    out = out.sum(dim=0)          # [B, D]
+                elif layer_reduce == "mean":
+                    out = out.mean(dim=0)         # [B, D]
+                elif layer_reduce == "last":
+                    out = out[-1]                 # [B, D]
+                elif layer_reduce == "concat":
+                    out = out.permute(1, 0, 2).reshape(out.size(1), -1)  # [B, L*D]
+                else:
+                    raise ValueError("layer_reduce must be sum|mean|last|concat")
+
+            elif out.dim() == 2:
+                pass  # already [B, D]
             elif out.dim() == 1:
-                out = out.unsqueeze(0)
+                out = out.unsqueeze(0)  # [1, D]
+            else:
+                raise RuntimeError(f"Unexpected out shape: {tuple(out.shape)}")
 
             all_emb.append(out.detach().cpu())
             all_y.append(torch.tensor([g.label for g in batch], dtype=torch.float32))
 
-    embeddings = torch.cat(all_emb, dim=0)  # [N, D]
+    embeddings = torch.cat(all_emb, dim=0)  # [N, D] (or [N, L*D] if concat)
     labels = torch.cat(all_y, dim=0)        # [N]
     return embeddings, labels

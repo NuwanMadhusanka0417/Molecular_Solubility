@@ -15,6 +15,7 @@ def getEmbedding( model, device, train_graphs, batch_size=100, SUM = True):
         batch_graphs = train_graphs[start_idx:end_idx]
         # print("getEmbedding :: Before BBBBB")
         output = model(batch_graphs)
+        
         # print(output.shape)
 
         ################### For regression taskuse TRUE and false both as sum ################
