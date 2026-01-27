@@ -58,16 +58,49 @@ def smiles_to_bond_angle_data_geognn(smiles, y):
     mol = Chem.AddHs(mol)
 
     # Generate a 3D conformer
+    # try:
+    #     params = AllChem.ETKDGv3()
+    #     params.randomSeed = 0xf00d
+    #     if AllChem.EmbedMolecule(mol, params) != 0:
+    #         return None  # embedding failed
+    #     AllChem.MMFFOptimizeMolecule(mol)
+    # except Exception:
+    #     return None
     try:
         params = AllChem.ETKDGv3()
         params.randomSeed = 0xf00d
-        if AllChem.EmbedMolecule(mol, params) != 0:
-            return None  # embedding failed
-        AllChem.MMFFOptimizeMolecule(mol)
+
+        # multiple conformers
+        conf_ids = AllChem.EmbedMultipleConfs(mol, numConfs=10, params=params)
+        if len(conf_ids) == 0:
+            return None
+
+        # optimize + pick lowest MMFF energy
+        mp = AllChem.MMFFGetMoleculeProperties(mol, mmffVariant='MMFF94s')
+        best_e = None
+        best_id = None
+
+        for cid in conf_ids:
+            try:
+                AllChem.MMFFOptimizeMolecule(mol, confId=cid)
+                ff = AllChem.MMFFGetMoleculeForceField(mol, mp, confId=cid)
+                e = ff.CalcEnergy()
+                if best_e is None or e < best_e:
+                    best_e = e
+                    best_id = cid
+            except Exception:
+                continue
+
+        if best_id is None:
+            return None
+
+        conf = mol.GetConformer(best_id)
+
     except Exception:
         return None
 
-    conf = mol.GetConformer()
+
+    # conf = mol.GetConformer()
     num_atoms = mol.GetNumAtoms()
 
     # Positions [N, 3]
@@ -213,11 +246,10 @@ class S2VGraph_geognn(object):
     self.edge_mat = 0
     self.mol = mol
     self.max_neighbor = 0
-    self.bond_x=None,
-    self.bond_endpoints=bond_x,
-    self.angle_edge_index=bond_endpoints,
-    self.angle_edge_attr=angle_edge_attr,
-
+    self.bond_x=bond_x
+    self.bond_endpoints=bond_endpoints
+    self.angle_edge_index=angle_edge_index
+    self.angle_edge_attr=angle_edge_attr
 
 def data_to_S2VGraph_bond_geognn(data):
     """
@@ -274,38 +306,43 @@ def create_bond_graph_list_geognn(dataset):
     return graphs
 
 
-def project_node_features_geognn(g_list, new_dim):
-    """
-    Randomly project node_features of each graph in g_list
-    from original_dim -> new_dim using a shared random matrix W.
-    """
-    if len(g_list) == 0:
-        return g_list
+# def project_node_features_geognn(g_list, new_dim):
+#     """
+#     Randomly project node_features of each graph in g_list
+#     from original_dim -> new_dim using a shared random matrix W.
+#     """
+#     if len(g_list) == 0:
+#         return g_list
 
-    # Make sure node_features exist
-    if g_list[0].node_features is None:
-        raise ValueError("node_features is None for the first graph. "
-                         "Make sure you set g.node_features before calling VSA_conversion.")
+#     # Make sure node_features exist
+#     if g_list[0].node_features is None:
+#         raise ValueError("node_features is None for the first graph. "
+#                          "Make sure you set g.node_features before calling VSA_conversion.")
 
-    original_feature_dim = g_list[0].node_features.size(1)
-    print("Original feature dim:", original_feature_dim)
-    print("Target HV dim       :", new_dim)
+#     original_feature_dim = g_list[0].node_features.size(1)
+#     print("Original feature dim:", original_feature_dim)
+#     print("Target HV dim       :", new_dim)
 
-    # Set a random seed for reproducibility (within this call)
-    torch.manual_seed(0)
+#     # Set a random seed for reproducibility (within this call)
+#     torch.manual_seed(0)
 
-    # Random projection matrix: [F_orig, new_dim]
-    W = torch.randn(original_feature_dim, new_dim) / math.sqrt(new_dim)
-    print("W shape:", W.shape)
+#     # Random projection matrix: [F_orig, new_dim]
+#     W = torch.randn(original_feature_dim, new_dim) / math.sqrt(new_dim)
+#     print("W shape:", W.shape)
 
-    print("g_list[0].node_features shape BEFORE:", g_list[0].node_features.shape)
+#     print("g_list[0].node_features shape BEFORE:", g_list[0].node_features.shape)
+#     for g in g_list:
+#         if g.node_features is not None:
+#             g.node_features = torch.matmul(g.node_features, W)
+#     print("g_list[0].node_features shape AFTER :", g_list[0].node_features.shape)
+
+#     return g_list
+
+def project_node_features_geognn(g_list, W):
     for g in g_list:
         if g.node_features is not None:
-            g.node_features = torch.matmul(g.node_features, W)
-    print("g_list[0].node_features shape AFTER :", g_list[0].node_features.shape)
-
+            g.node_features = g.node_features @ W
     return g_list
-
 
 def VSA_conversion_geognn(g_list, new_dim=None, use_bond_x_if_none=True):
     """
@@ -356,16 +393,17 @@ def VSA_conversion_geognn(g_list, new_dim=None, use_bond_x_if_none=True):
             g.edge_mat = torch.empty((2, 0), dtype=torch.long)
 
     # 3. Optional random projection to hypervector space
-    if new_dim is not None:
-        g_list = project_node_features_geognn(g_list, new_dim)
+    # if new_dim is not None:
+    #     g_list = project_node_features_geognn(g_list, new_dim)
 
     return g_list
 
 
-def getEmbedding_geognn( model, device, train_graphs, batch_size=100, SUM = True):
+'''def getEmbedding_geognn( model, device, train_graphs, batch_size=100, SUM = True):
 
-    model.to(device)
-    model.train()
+    model = model.to(device)
+    # model.train()
+    model.eval()
 
     combined_embeddings = []  # Initialize the total embedding
     all_labels = []
@@ -402,7 +440,36 @@ def getEmbedding_geognn( model, device, train_graphs, batch_size=100, SUM = True
 
 
     final_labels = torch.cat(all_labels, dim=0)
-    final_embeddings = torch.cat(combined_embeddings, dim=1)
+    final_embeddings = torch.cat(combined_embeddings, dim=0)
 
     # print("getEmbedding :: endo")
-    return final_embeddings, final_labels
+    return final_embeddings, final_labels'''
+
+def getEmbedding_geognn(model, device, graphs, batch_size=100):
+    """
+    Returns:
+        embeddings: [N, D]
+        labels:     [N]
+    """
+    model = model.to(device)
+    model.eval()
+
+    all_emb = []
+    all_y = []
+
+    with torch.no_grad():
+        for start in range(0, len(graphs), batch_size):
+            batch = graphs[start:start + batch_size]
+            out = model(batch)
+
+            if isinstance(out, (list, tuple)):
+                out = torch.stack(out, dim=0)
+            elif out.dim() == 1:
+                out = out.unsqueeze(0)
+
+            all_emb.append(out.detach().cpu())
+            all_y.append(torch.tensor([g.label for g in batch], dtype=torch.float32))
+
+    embeddings = torch.cat(all_emb, dim=0)  # [N, D]
+    labels = torch.cat(all_y, dim=0)        # [N]
+    return embeddings, labels

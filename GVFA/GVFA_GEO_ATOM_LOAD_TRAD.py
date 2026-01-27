@@ -37,7 +37,8 @@ from src.geaognn_all import (
 from src.atombond_all import (create_graph_list,
                               VSA_conversion,
                               getEmbedding,
-                              load_data)
+                              load_data,
+                              project_node_features)
 
 
 
@@ -59,12 +60,19 @@ for HV_dim in HV_dims:
     train_graphs_bond = VSA_conversion_geognn(train_graphs_bond, new_dim=HV_dim)
     test_graphs_bond  = VSA_conversion_geognn(test_graphs_bond,  new_dim=HV_dim)
 
+    F_in = train_graphs_bond[0].node_features.shape[1]
+    W_geo = torch.randn(F_in, HV_dim) / math.sqrt(F_in)
+
+    # 3) project with same W for train+test
+    train_graphs_bond = project_node_features_geognn(train_graphs_bond, W_geo)
+    test_graphs_bond  = project_node_features_geognn(test_graphs_bond,  W_geo)
+
     model_eq1 = GraphCNN(train_graphs_bond[0].node_features.shape[1], num_layers, delta_eq1, graph_pooling_type, neighbor_pooling_type, device, equation_eq1)
 
     train_geognn, train_labels_geognn = getEmbedding_geognn(model_eq1, device, train_graphs_bond)
     test_geognn, test_labels_geognn = getEmbedding_geognn(model_eq1, device, test_graphs_bond)
-    train_geognn = train_geognn.squeeze(0)
-    test_geognn = test_geognn.squeeze(0)
+    # train_geognn = train_geognn.squeeze(0)
+    # test_geognn = test_geognn.squeeze(0)
 
     ####################################### ATOm - BOND
 
@@ -75,14 +83,21 @@ for HV_dim in HV_dims:
     tr_graph = train_graphs.copy()
     test_HVs_ = VSA_conversion(ts_graph, HV_dim)
     train_HVs_ = VSA_conversion(tr_graph, HV_dim)
+
+    F_in = train_graphs[0].node_features.shape[1]
+    W_atom = torch.randn(F_in, HV_dim) / math.sqrt(F_in)
+
+    train_HVs_ = project_node_features(train_HVs_, W_atom)
+    test_HVs_  = project_node_features(test_HVs_,  W_atom)
+
     train_HVs = [train_HVs_[i] for i in train_data_geognn.good_idx]
     test_HVs = [test_HVs_[i] for i in test_data_geognn.good_idx]
 
     model_eq1 = GraphCNN(test_HVs[0].node_features.shape[1], num_layers, delta_eq1, graph_pooling_type, neighbor_pooling_type, device, equation_eq1) #.to(device)
     train_atom_bond, train_labels_atom_bond = getEmbedding(model_eq1, device, train_HVs)
     test_atom_bond, test_labels_atom_bond = getEmbedding(model_eq1, device, test_HVs)
-    train_atom_bond = train_atom_bond.squeeze(0)
-    test_atom_bond = test_atom_bond.squeeze(0)
+    # train_atom_bond = train_atom_bond.squeeze(0)
+    # test_atom_bond = test_atom_bond.squeeze(0)
 
     combined_train_atom_bond_geognn = torch.cat(
         [train_atom_bond, train_geognn],

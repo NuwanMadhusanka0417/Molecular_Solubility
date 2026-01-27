@@ -357,24 +357,30 @@ def load_data():
 
   return dataset_train, dataset_test #, gl_train, 
 
-def project_node_features(g_list, original_feature_dim, new_dim):
-    # Set a random seed for reproducibility
-    torch.manual_seed(0)
-    # Generate a random projection matrix
-    # R = np.random.randn(original_feature_dim, new_dim) / np.sqrt(new_dim)
-    # Initialize a random weight matrix for projection
-    W = torch.randn(original_feature_dim, new_dim) / np.sqrt(new_dim)
-    print("W : ", W.shape)
-    # Project node features for each graph
+# def project_node_features(g_list, original_feature_dim, new_dim):
+#     # Set a random seed for reproducibility
+#     torch.manual_seed(0)
+#     # Generate a random projection matrix
+#     # R = np.random.randn(original_feature_dim, new_dim) / np.sqrt(new_dim)
+#     # Initialize a random weight matrix for projection
+#     W = torch.randn(original_feature_dim, new_dim) / np.sqrt(new_dim)
+#     print("W : ", W.shape)
+#     # Project node features for each graph
 
-    print("g list item shape before : ", g_list[0].node_features.shape)
+#     print("g list item shape before : ", g_list[0].node_features.shape)
+#     for g in g_list:
+#         # Assuming g.node_features is a torch.Tensor
+#         if g.node_features is not None:
+#             # print(g.node_features)
+#             g.node_features  = torch.matmul(g.node_features, W)
+#             # print("new g.node_features : ",g.node_features.shape)
+#     print("g list item shape after : ", g_list[0].node_features.shape)
+#     return g_list
+
+def project_node_features(g_list, W):
     for g in g_list:
-        # Assuming g.node_features is a torch.Tensor
         if g.node_features is not None:
-            # print(g.node_features)
-            g.node_features  = torch.matmul(g.node_features, W)
-            # print("new g.node_features : ",g.node_features.shape)
-    print("g list item shape after : ", g_list[0].node_features.shape)
+            g.node_features = g.node_features @ W
     return g_list
 
 def VSA_conversion(g_list, new_dim=None):
@@ -416,14 +422,15 @@ def VSA_conversion(g_list, new_dim=None):
     print("VSA_conversion",len(g_list[0].node_features[0]))
 
 
-    if new_dim:
-        g_list = project_node_features(g_list, original_feature_dim, new_dim)
+    # if new_dim:
+    #     g_list = project_node_features(g_list, original_feature_dim, new_dim)
     return g_list
 
-def getEmbedding( model, device, train_graphs, batch_size=100, SUM = True):
+'''def getEmbedding( model, device, train_graphs, batch_size=100, SUM = True):
 
-    model.to(device)
-    model.train()
+    model = model.to(device)
+    # model.train()
+    model.eval()
 
     combined_embeddings = []  # Initialize the total embedding
     all_labels = []
@@ -460,7 +467,37 @@ def getEmbedding( model, device, train_graphs, batch_size=100, SUM = True):
 
 
     final_labels = torch.cat(all_labels, dim=0)
-    final_embeddings = torch.cat(combined_embeddings, dim=1)
+    final_embeddings = torch.cat(combined_embeddings, dim=0)
 
     # print("getEmbedding :: endo")
-    return final_embeddings, final_labels
+    return final_embeddings, final_labels'''
+
+def getEmbedding(model, device, graphs, batch_size=100):
+    """
+    Returns:
+        embeddings: [N, D]
+        labels:     [N]
+    """
+    model = model.to(device)
+    model.eval()
+
+    all_emb = []
+    all_y = []
+
+    with torch.no_grad():
+        for start in range(0, len(graphs), batch_size):
+            batch = graphs[start:start + batch_size]
+            out = model(batch)
+
+            # normalize out to tensor [B, D]
+            if isinstance(out, (list, tuple)):
+                out = torch.stack(out, dim=0)
+            elif out.dim() == 1:
+                out = out.unsqueeze(0)
+
+            all_emb.append(out.detach().cpu())
+            all_y.append(torch.tensor([g.label for g in batch], dtype=torch.float32))
+
+    embeddings = torch.cat(all_emb, dim=0)  # [N, D]
+    labels = torch.cat(all_y, dim=0)        # [N]
+    return embeddings, labels
