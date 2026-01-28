@@ -13,6 +13,8 @@ import torch
 from xgboost import XGBRegressor
 import numpy as np
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from src.VSA_conversion import VSA_conversion, make_random_projection, project_node_features_with_W
+import math
 
 
 train_data, test_data = load_data()
@@ -31,23 +33,36 @@ neighbor_pooling_type = 'sum' # sum, average, max
 device = 1  # help='if delta is 1 will be the model with binding, if 0 model will have be without binding (default: 1)'
 device = torch.device('cpu')
 
-dims = [100, 500, 1000, 2000, 5000, 10000]
+dims = [1000, 2000, 5000, 10000]
 
 for dim in dims:
     train_graphs = create_graph_list(train_data)
     test_graphs = create_graph_list(test_data)
     ts_graph = test_graphs.copy()
     tr_graph = train_graphs.copy()
-    test_HVs = VSA_conversion(ts_graph, dim)
-    train_HVs = VSA_conversion(tr_graph, dim)
 
-    model_eq1 = GraphCNN(test_HVs[0].node_features.shape[1], num_layers, delta_eq1, graph_pooling_type, neighbor_pooling_type, device, equation_eq1) #.to(device)
-    train_embeddings_eq1, train_labels_eq1 = getEmbedding(model_eq1, device, train_HVs)
-    test_embeddings_eq1, test_labels_eq1 = getEmbedding(model_eq1, device, test_HVs)
+    train_graphs  = VSA_conversion(ts_graph, dim)
+    test_graphs   = VSA_conversion(tr_graph, dim)
 
-    train_embeddings_eq1 = train_embeddings_eq1.squeeze(0)
+    # create W ONCE per HV_dim
+    F_in = train_graphs[0].node_features.shape[1]
+    W = make_random_projection(F_in, dim, seed=42, device="cpu")
 
-    test_embeddings_eq1 = test_embeddings_eq1.squeeze(0)
+    # apply SAME W to train and test
+    train_graphs = project_node_features_with_W(train_graphs, W)
+    test_graphs  = project_node_features_with_W(test_graphs,  W)
+
+    model_eq1 = GraphCNN(test_graphs[0].node_features.shape[1], num_layers, delta_eq1, graph_pooling_type, neighbor_pooling_type, device, equation_eq1) #.to(device)
+    # train_embeddings_eq1, train_labels_eq1 = getEmbedding(model_eq1, device, train_HVs)
+    # test_embeddings_eq1, test_labels_eq1 = getEmbedding(model_eq1, device, test_HVs)
+    train_embeddings_eq1, train_labels_eq1 = getEmbedding(model_eq1, device, train_graphs, layer_reduce="sum")
+    test_embeddings_eq1,  test_labels_eq1  = getEmbedding(model_eq1, device, test_graphs,  layer_reduce="sum")
+
+
+
+    # train_embeddings_eq1 = train_embeddings_eq1.squeeze(0)
+
+    # test_embeddings_eq1 = test_embeddings_eq1.squeeze(0)
 
     # print(len(test_graphs))
     # print(test_graphs[0].node_features)
@@ -66,15 +81,17 @@ for dim in dims:
         tree_method="hist"   # fast on CPU; use "gpu_hist" if you have GPU
     )
 
-    xgb.fit(
-        train_embeddings_eq1, train_labels_eq1,
-        eval_set=[(test_embeddings_eq1, test_labels_eq1)],
-        # early_stopping_rounds=100,
-        verbose=False
-    )
+    # xgb.fit(
+    #     train_embeddings_eq1, train_labels_eq1,
+    #     eval_set=[(test_embeddings_eq1, test_labels_eq1)],
+    #     # early_stopping_rounds=100,
+    #     verbose=False
+    # )
+    xgb.fit(train_embeddings_eq1.numpy(), train_labels_eq1.numpy())
 
     # ---------- Evaluate ----------
-    pred = xgb.predict(test_embeddings_eq1)
+    # pred = xgb.predict(test_embeddings_eq1)
+    pred = xgb.predict(test_embeddings_eq1.numpy())
     rmse = mean_squared_error(test_labels_eq1, pred)
     mae  = mean_absolute_error(test_labels_eq1, pred)
     r2   = r2_score(test_labels_eq1, pred)

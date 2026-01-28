@@ -22,6 +22,26 @@ def project_node_features(g_list, original_feature_dim, new_dim):
     print("g list item shape after : ", g_list[0].node_features.shape)
     return g_list
 
+def project_node_features_with_W(graphs, W):
+    """
+    Apply a fixed projection W to every graph's node_features.
+    graphs: list of S2VGraph-like objects with .node_features [num_nodes, F_in]
+    W:      torch.Tensor [F_in, F_out]
+    """
+    for g in graphs:
+        if getattr(g, "node_features", None) is not None:
+            g.node_features = g.node_features @ W
+    return graphs
+
+def make_random_projection(F_in, F_out, seed=0, device="cpu", dtype=torch.float32):
+    """
+    Create a reproducible random projection matrix with stable scaling.
+    """
+    gen = torch.Generator(device=device)
+    gen.manual_seed(seed)
+    W = torch.randn((F_in, F_out), generator=gen, device=device, dtype=dtype) / math.sqrt(F_in)
+    return W
+
 def VSA_conversion(g_list, new_dim=None):
     # Add labels and edge_mat
     for g in g_list:
@@ -61,6 +81,6 @@ def VSA_conversion(g_list, new_dim=None):
     print("VSA_conversion",len(g_list[0].node_features[0]))
 
 
-    if new_dim:
-        g_list = project_node_features(g_list, original_feature_dim, new_dim)
+    # if new_dim:
+    #     g_list = project_node_features(g_list, original_feature_dim, new_dim)
     return g_list
