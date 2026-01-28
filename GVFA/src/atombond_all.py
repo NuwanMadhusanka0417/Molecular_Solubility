@@ -203,11 +203,14 @@ def expand_atomic_features(data, mol):
 
 
     
-    enhanced_features = torch.cat((atomic_numbers, degrees, 
-                                   valence_electrons, hybridization, aromaticity,
-                                   formal_charge,
+    enhanced_features = torch.cat((atomic_numbers, 
+                                   degrees, 
+                                   valence_electrons, 
+                                   hybridization, 
+                                #    aromaticity,
+                                #    formal_charge,
                                     hbond_flags,
-                                    chirality,
+                                    # chirality,
                                     ), dim=1)
     # print("valence_electrons ", valence_electrons)
     # print("hybridization ", hybridization)

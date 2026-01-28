@@ -1,7 +1,7 @@
 
 import torch
 import numpy as np
-
+import math
 def project_node_features(g_list, original_feature_dim, new_dim):
     # Set a random seed for reproducibility
     torch.manual_seed(0)
