@@ -34,7 +34,7 @@ neighbor_pooling_type = 'sum' # sum, average, max
 device = 1  # help='if delta is 1 will be the model with binding, if 0 model will have be without binding (default: 1)'
 device = torch.device('cpu')
 
-dims = [100, 500, 1000, 2000, 5000, 10000]
+dims = [1000, 2000, 5000, 10000]
 
 for dim in dims:
     train_graphs = create_graph_list(train_data)

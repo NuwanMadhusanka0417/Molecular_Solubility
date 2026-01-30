@@ -161,7 +161,8 @@ def build_edge_features_geognn_for_atom_graph(data, mol):
     try:
         Chem.SanitizeMol(mol3d)
     except Exception:
-        return None
+        mol3d.UpdatePropertyCache(strict=False)
+        # return None
     mol3d = Chem.AddHs(mol3d)
     try:
         params = AllChem.ETKDGv3()
