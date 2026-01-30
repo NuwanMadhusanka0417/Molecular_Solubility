@@ -47,7 +47,7 @@ for dim in dims:
     model_eq1 = GraphCNN(
         test_HVs[0].node_features.shape[1], num_layers, delta_eq1,
         graph_pooling_type, neighbor_pooling_type, device, equation_eq1,
-        edge_feat_dim=4,
+        edge_feat_dim=5,
     )
     train_embeddings_eq1, train_labels_eq1 = getEmbedding(model_eq1, device, train_HVs)
     test_embeddings_eq1, test_labels_eq1 = getEmbedding(model_eq1, device, test_HVs)

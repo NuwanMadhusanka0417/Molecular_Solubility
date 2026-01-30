@@ -6,21 +6,26 @@ from torch_geometric.data import Data
 import numpy as np
 from rdkit.Chem import AllChem
 
+def _bond_stereo_to_float(stereo):
+    """Map RDKit BondStereo to scalar: 0=None, 1=CIS, 2=TRANS, 3=Z, 4=E."""
+    mapping = {
+        Chem.rdchem.BondStereo.STEREONONE: 0.0,
+        Chem.rdchem.BondStereo.STEREOCIS: 1.0,
+        Chem.rdchem.BondStereo.STEREOTRANS: 2.0,
+        Chem.rdchem.BondStereo.STEREOZ: 3.0,
+        Chem.rdchem.BondStereo.STEREOE: 4.0,
+    }
+    return float(mapping.get(stereo, 0.0))
+
+
 def bond_node_features_geognn(bond, pos):
     """
     Compute features for a single bond.
 
-    Parameters
-    ----------
-    bond : rdchem.Bond
-        RDKit bond object.
-    pos : np.ndarray
-        Array of atom positions with shape [num_atoms, 3].
-
     Returns
     -------
-    np.ndarray, shape [4]
-        [bond_type, is_conjugated, in_ring, bond_length]
+    np.ndarray, shape [5]
+        [bond_type, is_conjugated, in_ring, bond_length, stereo]
     """
     bt = bond.GetBondType()
     bond_type = {
@@ -35,12 +40,11 @@ def bond_node_features_geognn(bond, pos):
 
     a = bond.GetBeginAtomIdx()
     b = bond.GetEndAtomIdx()
-
-    # 3D bond length using positions in `pos`
     length = float(np.linalg.norm(pos[a] - pos[b]))
 
-    return np.array([bond_type, is_conjugated, in_ring, length],
-                    dtype=np.float32)
+    stereo = _bond_stereo_to_float(bond.GetStereo())
+
+    return np.array([bond_type, is_conjugated, in_ring, length, stereo], dtype=np.float32)
 '''
 def build_edge_features_geognn_for_atom_graph(data, mol):
     """
@@ -150,15 +154,14 @@ def build_edge_features_geognn_for_atom_graph(data, mol):
     Build edge_attr aligned with data.edge_index using
     bond_node_features_geognn(bond, pos).
 
-    Returns: torch.FloatTensor [E, 4] or None if 3D embedding fails.
+    Returns: torch.FloatTensor [E, 5] or None if 3D embedding fails.
     Uses the *provided* mol (same atom order as data.edge_index) so (u,v) align.
     """
     mol3d = Chem.RWMol(mol)
     try:
         Chem.SanitizeMol(mol3d)
     except Exception:
-        # return None
-        mol3d.UpdatePropertyCache(strict=False)
+        return None
     mol3d = Chem.AddHs(mol3d)
     try:
         params = AllChem.ETKDGv3()
@@ -186,11 +189,11 @@ def build_edge_features_geognn_for_atom_graph(data, mol):
 
         bond = mol3d.GetBondBetweenAtoms(u, v)
         if bond is None:
-            edge_feats.append(np.zeros(4, dtype=np.float32))
+            edge_feats.append(np.zeros(5, dtype=np.float32))
         else:
             edge_feats.append(bond_node_features_geognn(bond, pos))
 
-    edge_attr = np.stack(edge_feats, axis=0)  # [E, 4]
+    edge_attr = np.stack(edge_feats, axis=0)  # [E, 5]
     return torch.from_numpy(edge_attr)
 
 def expand_atomic_features(data, mol):
@@ -219,7 +222,15 @@ def expand_atomic_features(data, mol):
     formal_charge = torch.zeros((num_nodes, 1))      # assuming neutral atoms
     hbond_flags  = torch.zeros((num_nodes, 2))       # [is_donor, is_acceptor]
     chirality    = torch.zeros((num_nodes, 2))       # [R, S] placeholder
+    num_attached_h = torch.zeros((num_nodes, 1))     # number of H attached to each atom
 
+    mol_h = Chem.RWMol(mol)
+    try:
+        Chem.SanitizeMol(mol_h)
+        for i in range(num_nodes):
+            num_attached_h[i] = float(mol_h.GetAtomWithIdx(i).GetTotalNumHs())
+    except Exception:
+        pass
 
     valence_dict = {
         0:0,
@@ -387,7 +398,7 @@ def expand_atomic_features(data, mol):
                 chirality[i, 1] = 1.0   # S
 
     # ================== NEW: edge features → node features ==================
-    edge_attr = build_edge_features_geognn_for_atom_graph(data, mol)  # [E, 4] or None
+    edge_attr = build_edge_features_geognn_for_atom_graph(data, mol)  # [E, 5] or None
 
     if edge_attr is not None:
         num_nodes = data.x.shape[0]
@@ -403,9 +414,9 @@ def expand_atomic_features(data, mol):
             node_edge_sum[v] += feat
 
         # mean over incident bonds; atoms with degree 0 just stay zeros
-        node_edge_mean = node_edge_sum / degrees.clamp(min=1.0)  # [N, 4]
+        node_edge_mean = node_edge_sum / degrees.clamp(min=1.0)  # [N, 5]
     else:
-        node_edge_mean = torch.zeros((num_nodes, 4), dtype=torch.float32)
+        node_edge_mean = torch.zeros((num_nodes, 5), dtype=torch.float32)
     # =======================================================================
 
 
@@ -414,10 +425,10 @@ def expand_atomic_features(data, mol):
     enhanced_features = torch.cat((atomic_numbers, degrees, 
                                    valence_electrons, hybridization, aromaticity,
                                    formal_charge,
-                                    hbond_flags,
-                                    chirality,
-                                    #node_edge_mean,
-                                    ), dim=1)
+                                   hbond_flags,
+                                   chirality,
+                                   num_attached_h,
+                                   ), dim=1)
     # print("valence_electrons ", valence_electrons)
     # print("hybridization ", hybridization)
     # Concatenate all features
@@ -519,9 +530,9 @@ def create_graph_list(dataset):
     # NEW: raw edge features per bond (E, F_edge)
     edge_attr = build_edge_features_geognn_for_atom_graph(data, mol)
     if edge_attr is None:
-        # fallback: zero features, but keep shape consistent
+        # fallback: zero features, but keep shape consistent [E, 5]
         E = data.edge_index.shape[1]
-        edge_attr = torch.zeros((E, 4), dtype=torch.float32)
+        edge_attr = torch.zeros((E, 5), dtype=torch.float32)
 
     edge_index = data.edge_index.clone()                       # [2, E]
 

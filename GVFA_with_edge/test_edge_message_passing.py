@@ -16,7 +16,7 @@ def main():
     train_HVs = VSA_conversion(train_graphs, 100)
     test_HVs = VSA_conversion(test_graphs, 100)
 
-    model = GraphCNN(100, 3, 1, "sum", "sum", torch.device("cpu"), 10, edge_feat_dim=4)
+    model = GraphCNN(100, 3, 1, "sum", "sum", torch.device("cpu"), 10, edge_feat_dim=5)
     out = model(train_HVs)
     print("Output shape:", out.shape)
     print("Expected: (num_layers, batch_size, dim) = (3, 5, 100)")
