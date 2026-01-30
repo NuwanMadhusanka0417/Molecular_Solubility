@@ -1,6 +1,8 @@
 '''
-This code use 7 features of atoms as node features. 
-USe "sol" python environment 
+Graph-based VSA model with edge-conditioned message passing.
+Node features: 7 atom features. Edge features: bond type, conjugated, ring, length.
+For each bond (u,v), messages combine neighbour atom with that bond and are sent
+along the bond. Use "sol" python environment.
 '''
 
 
@@ -42,7 +44,11 @@ for dim in dims:
     test_HVs = VSA_conversion(ts_graph, dim)
     train_HVs = VSA_conversion(tr_graph, dim)
 
-    model_eq1 = GraphCNN(test_HVs[0].node_features.shape[1], num_layers, delta_eq1, graph_pooling_type, neighbor_pooling_type, device, equation_eq1) #.to(device)
+    model_eq1 = GraphCNN(
+        test_HVs[0].node_features.shape[1], num_layers, delta_eq1,
+        graph_pooling_type, neighbor_pooling_type, device, equation_eq1,
+        edge_feat_dim=4,
+    )
     train_embeddings_eq1, train_labels_eq1 = getEmbedding(model_eq1, device, train_HVs)
     test_embeddings_eq1, test_labels_eq1 = getEmbedding(model_eq1, device, test_HVs)
 

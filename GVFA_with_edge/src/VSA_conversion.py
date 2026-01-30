@@ -115,26 +115,24 @@ def VSA_conversion(g_list, new_dim=None):
     - if new_dim is given, it uses project_with_vsa to
       create hypervectors + edge-aware message passing.
     """
-    # Build neighbors and edge_mat (as before)
+    # Build neighbors and edge_mat; use edge_index when available (aligns with edge_attr)
     for g in g_list:
         g.neighbors = [[] for _ in range(len(g.g))]
-
-        # Build neighbors list
         for i, j in g.g.edges():
             g.neighbors[i].append(j)
             g.neighbors[j].append(i)
-
-        # Compute max degree
         degree_list = [len(g.neighbors[i]) for i in range(len(g.g))]
         g.max_neighbor = max(degree_list) if degree_list else 0
 
-        # Create edge matrix for GraphCNN (undirected, both directions)
-        edges = [list(pair) for pair in g.g.edges()]
-        edges.extend([[j, i] for i, j in edges])
-        if edges:
-            g.edge_mat = torch.LongTensor(edges).transpose(0, 1)
+        if hasattr(g, "edge_index") and g.edge_index is not None and g.edge_index.numel() > 0:
+            g.edge_mat = g.edge_index.clone()
         else:
-            g.edge_mat = torch.zeros((2, 0), dtype=torch.long)
+            edges = [list(pair) for pair in g.g.edges()]
+            edges.extend([[j, i] for i, j in edges])
+            if edges:
+                g.edge_mat = torch.LongTensor(edges).transpose(0, 1)
+            else:
+                g.edge_mat = torch.zeros((2, 0), dtype=torch.long)
 
     # If no projection requested, just return graphs as-is
     if not new_dim:

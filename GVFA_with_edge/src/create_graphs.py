@@ -147,31 +147,28 @@ def build_edge_features_geognn_for_atom_graph(data, mol):
 
 def build_edge_features_geognn_for_atom_graph(data, mol):
     """
-    Build edge_attr aligned with data.edge_index using your
+    Build edge_attr aligned with data.edge_index using
     bond_node_features_geognn(bond, pos).
 
     Returns: torch.FloatTensor [E, 4] or None if 3D embedding fails.
+    Uses the *provided* mol (same atom order as data.edge_index) so (u,v) align.
     """
-    # Use SMILES to get a clean, sanitized molecule
-    smiles = Chem.MolToSmiles(mol)
-    mol3d = Chem.MolFromSmiles(smiles)
-    if mol3d is None:
-        return None
-
-    # Add hydrogens and 3D coords (same as your working function)
+    mol3d = Chem.RWMol(mol)
     try:
-        mol3d = Chem.AddHs(mol3d)
-
+        Chem.SanitizeMol(mol3d)
+    except Exception:
+        # return None
+        mol3d.UpdatePropertyCache(strict=False)
+    mol3d = Chem.AddHs(mol3d)
+    try:
         params = AllChem.ETKDGv3()
-        params.randomSeed = 0xf00d
+        params.randomSeed = 0xF00D
         if AllChem.EmbedMolecule(mol3d, params) != 0:
             return None
-
         AllChem.MMFFOptimizeMolecule(mol3d)
     except Exception:
         return None
 
-    # 3D positions
     conf = mol3d.GetConformer()
     num_atoms = mol3d.GetNumAtoms()
     pos = np.zeros((num_atoms, 3), dtype=np.float32)
@@ -189,13 +186,9 @@ def build_edge_features_geognn_for_atom_graph(data, mol):
 
         bond = mol3d.GetBondBetweenAtoms(u, v)
         if bond is None:
-            # If all edges are chemical bonds, this shouldn't happen.
-            # You can assert here to catch bugs:
-            # raise RuntimeError(f"No bond for edge ({u},{v})")
             edge_feats.append(np.zeros(4, dtype=np.float32))
         else:
-            bf = bond_node_features_geognn(bond, pos)  # your working function
-            edge_feats.append(bf)
+            edge_feats.append(bond_node_features_geognn(bond, pos))
 
     edge_attr = np.stack(edge_feats, axis=0)  # [E, 4]
     return torch.from_numpy(edge_attr)

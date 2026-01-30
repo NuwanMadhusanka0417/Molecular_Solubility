@@ -2,31 +2,38 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.fft import fft, ifft
+import math
 import sys
 sys.path.append("models/")
 from models.mlp import MLP
 
 class GraphCNN(nn.Module):
-    def __init__(self, input_dim, num_layers, delta, graph_pooling_type, neighbor_pooling_type, device,equation):
+    def __init__(self, input_dim, num_layers, delta, graph_pooling_type, neighbor_pooling_type, device, equation, edge_feat_dim=4):
         '''
-            num_layers: number of layers in the neural networks (INCLUDING the input layer)
-            input_dim: dimensionality of input features
-            delta: usage of binding or not
-            neighbor_pooling_type: how to aggregate neighbors (mean, average, or max)
-            graph_pooling_type: how to aggregate entire nodes in a graph (mean, average)
-            device: which device to use
+            num_layers: number of layers (INCLUDING input)
+            input_dim: node HV dim D
+            delta: binding usage
+            neighbor_pooling_type: sum, average, or max
+            graph_pooling_type: sum or average
+            device: device
+            edge_feat_dim: raw edge feature dim; 0 = no edge conditioning
         '''
 
         super(GraphCNN, self).__init__()
         print("Input feature size: ", input_dim)
-        # self.final_dropout = final_dropout
         self.device = device
         self.num_layers = num_layers
         self.graph_pooling_type = graph_pooling_type
         self.neighbor_pooling_type = neighbor_pooling_type
         self.learn_eps = True
         self.delta = delta
-        self.equation  = equation
+        self.equation = equation
+        self.edge_feat_dim = edge_feat_dim if edge_feat_dim else 0
+
+        if self.edge_feat_dim > 0:
+            g = torch.Generator().manual_seed(0)
+            W_edge = torch.randn(self.edge_feat_dim, input_dim, generator=g) / math.sqrt(self.edge_feat_dim)
+            self.register_buffer("W_edge", W_edge)
 
     def __preprocess_neighbors_sumavepool(self, batch_graph):
         ###create block diagonal sparse matrix
@@ -82,6 +89,46 @@ class GraphCNN(nn.Module):
         
         return graph_pool.to(self.device)
 
+    def __preprocess_edges(self, batch_graph):
+        """Batched edge_index [2, E_total] and edge_attr [E_total, F_edge], aligned. start_idx for node offsets."""
+        start_idx = [0]
+        for i, g in enumerate(batch_graph):
+            start_idx.append(start_idx[i] + len(g.g))
+        ei_list, ea_list = [], []
+        for i, g in enumerate(batch_graph):
+            ei = getattr(g, "edge_index", None)
+            ea = getattr(g, "edge_attr", None)
+            if ei is None or ea is None or ei.numel() == 0 or ea.numel() == 0:
+                continue
+            off = start_idx[i]
+            ei_list.append(ei.to(self.device) + off)
+            ea_list.append(ea.to(self.device))
+        if not ei_list:
+            return None, None, start_idx
+        batched_ei = torch.cat(ei_list, dim=1)
+        batched_ea = torch.cat(ea_list, dim=0)
+        return batched_ei, batched_ea, start_idx
+
+    def _edge_message_pool(self, h_to_pool, edge_index, edge_H, num_nodes, average=False):
+        """
+        Edge-conditioned message passing: for each edge (src, dst), message = bind(h_to_pool[src], edge_H[e]),
+        then aggregate at dst. Caller passes rotated or plain h as h_to_pool. Physically: combine
+        neighbour atom with the bond along that edge, send message along that bond.
+        """
+        E = edge_index.shape[1]
+        D = h_to_pool.shape[1]
+        src, dst = edge_index[0], edge_index[1]
+        neighbor_h = h_to_pool[src]
+        messages = self.bind(neighbor_h, edge_H)
+        pooled = torch.zeros(num_nodes, D, device=h_to_pool.device, dtype=h_to_pool.dtype)
+        pooled.index_add_(0, dst, messages)
+        if average:
+            degree = torch.zeros(num_nodes, 1, device=h_to_pool.device, dtype=h_to_pool.dtype)
+            degree.index_add_(0, dst.unsqueeze(1), torch.ones(E, 1, device=h_to_pool.device, dtype=h_to_pool.dtype))
+            degree = degree.clamp(min=1.0)
+            pooled = pooled / degree
+        return pooled
+
     def maxpool(self, h, padded_neighbor_list):
         ###Element-wise minimum will never affect max-pooling
 
@@ -116,158 +163,93 @@ class GraphCNN(nn.Module):
         for i, p in enumerate(perm):
             inverse[p] = i
         return inverse
-    def next_layer_eps(self, h, layer, padded_neighbor_list = None, Adj_block = None, delta = 1, equation = 10):
-        
-        if(equation==10):
-            n_rows, n_cols = h.shape
-            torch.manual_seed(0)
-            rotated_matrix = h.clone()  # Start with the original matrix
-            shift = 1
-            rotated_matrix = torch.roll(rotated_matrix, shifts=shift, dims=1)
-            if self.neighbor_pooling_type == "max":
-                ##If max pooling
-                pooled = self.maxpool(rotated_matrix, padded_neighbor_list)
-                # pooled_no_perm = self.maxpool(h, padded_neighbor_list)
-            else:
-                #If sum or average pooling
-                pooled = torch.spmm(Adj_block, rotated_matrix)
-                # pooled_no_perm = torch.spmm(Adj_block, h)
-                if self.neighbor_pooling_type == "average":
-                    #If average pooling
-                    degree = torch.spmm(Adj_block, torch.ones((Adj_block.shape[0], 1)).to(self.device))
-                    pooled = pooled/degree
-            
-            if(delta ==1):
-                pooled = self.bind(h,pooled)+h #self.bind(h,pooled) +  h   #pooled + h  #self.bind(h,pooled) + #
-            elif(delta ==2):
-                pooled = self.bind(h,pooled)+h+pooled #self.bind(h,pooled) +  h   #pooled + h  #self.bind(h,pooled) + #
-            else:
-                # print("This is pooled")
-                # print(pooled)
-                pooled = pooled+h
-            
-            
-        elif(equation==11):
-            n_rows, n_cols = h.shape
-            torch.manual_seed(0)
+    def _pool_neighbors(self, h_pool, Adj_block, padded_neighbor_list, edge_index, edge_H, num_nodes):
+        """Dispatch to edge-conditioned pool or adjacency-based pool."""
+        use_edges = edge_index is not None and edge_H is not None and num_nodes is not None
+        avg = (self.neighbor_pooling_type == "average")
+        if use_edges:
+            return self._edge_message_pool(h_pool, edge_index, edge_H, num_nodes, average=avg)
+        if self.neighbor_pooling_type == "max":
+            return self.maxpool(h_pool, padded_neighbor_list)
+        pooled = torch.spmm(Adj_block, h_pool)
+        if avg:
+            degree = torch.spmm(Adj_block, torch.ones((Adj_block.shape[0], 1)).to(self.device))
+            pooled = pooled / degree
+        return pooled
 
-            if self.neighbor_pooling_type == "max":
-                ##If max pooling
-                # pooled = self.maxpool(rotated_matrix, padded_neighbor_list)
-                pooled_no_perm = self.maxpool(h, padded_neighbor_list)
+    def next_layer_eps(self, h, layer, padded_neighbor_list=None, Adj_block=None, delta=1, equation=10,
+                       edge_index=None, edge_H=None, num_nodes=None):
+        shift = 1
+        torch.manual_seed(0)
+
+        if equation == 10:
+            rotated = torch.roll(h.clone(), shifts=shift, dims=1)
+            pooled = self._pool_neighbors(rotated, Adj_block, padded_neighbor_list, edge_index, edge_H, num_nodes)
+            if delta == 1:
+                pooled = self.bind(h, pooled) + h
+            elif delta == 2:
+                pooled = self.bind(h, pooled) + h + pooled
             else:
-                #If sum or average pooling
-                # pooled = torch.spmm(Adj_block, rotated_matrix)
-                pooled_no_perm = torch.spmm(Adj_block, h)
-                if self.neighbor_pooling_type == "average":
-                    #If average pooling
-                    degree = torch.spmm(Adj_block, torch.ones((Adj_block.shape[0], 1)).to(self.device))
-                    # pooled = pooled/degree
-                    pooled_no_perm = pooled_no_perm/degree
-            pooled = pooled_no_perm
-            if(delta ==1):
-                pooled = self.bind(h,pooled)+h #self.bind(h,pooled) +  h   #pooled + h  #self.bind(h,pooled) + #
-            elif(delta ==2):
-                pooled = self.bind(h,pooled)+h+pooled #self.bind(h,pooled) +  h   #pooled + h  #self.bind(h,pooled) + #
+                pooled = pooled + h
+
+        elif equation == 11:
+            pooled = self._pool_neighbors(h, Adj_block, padded_neighbor_list, edge_index, edge_H, num_nodes)
+            if delta == 1:
+                pooled = self.bind(h, pooled) + h
+            elif delta == 2:
+                pooled = self.bind(h, pooled) + h + pooled
             else:
-                # print("AT zero NO BINDING")
-                pooled = pooled+h
-
-            rotated_matrix = pooled.clone()  # Start with the original matrix
-            shift = 1  # 
-            #### APPLY PERMUTATION
-            # inverse_permutation = self.invert_permutation(permutation)
-
-            # for _ in range( shift): #layer + 1
-            #     rotated_matrix = rotated_matrix[:, inverse_permutation]  # Apply permutation multiple times
-
-            #### APPLY ROTATION
-            # Circularly shift columns
-            rotated_matrix = torch.roll(rotated_matrix, shifts=shift, dims=1)
-            pooled = rotated_matrix
+                pooled = pooled + h
+            pooled = torch.roll(pooled, shifts=shift, dims=1)
 
         else:
-            n_rows, n_cols = h.shape
-            torch.manual_seed(0)
-            rotated_matrix = h.clone()  # Start with the original matrix
-            shift = 1
-            rotated_matrix = torch.roll(rotated_matrix, shifts=shift, dims=1)
-            if self.neighbor_pooling_type == "max":
-                ##If max pooling
-                pooled = self.maxpool(rotated_matrix, padded_neighbor_list)
-                # pooled_no_perm = self.maxpool(h, padded_neighbor_list)
+            rotated = torch.roll(h.clone(), shifts=shift, dims=1)
+            pooled = self._pool_neighbors(rotated, Adj_block, padded_neighbor_list, edge_index, edge_H, num_nodes)
+            if delta == 1:
+                pooled = self.bind(h, pooled) + h
+            elif delta == 2:
+                pooled = self.bind(h, pooled) + h + pooled
             else:
-                #If sum or average pooling
-                pooled = torch.spmm(Adj_block, rotated_matrix)
-                # pooled_no_perm = torch.spmm(Adj_block, h)
-                if self.neighbor_pooling_type == "average":
-                    #If average pooling
-                    degree = torch.spmm(Adj_block, torch.ones((Adj_block.shape[0], 1)).to(self.device))
-                    pooled = pooled/degree
-            
-            if(delta ==1):
-                pooled = self.bind(h,pooled)+h #self.bind(h,pooled) +  h   #pooled + h  #self.bind(h,pooled) + #
-            elif(delta ==2):
-                pooled = self.bind(h,pooled)+h+pooled #self.bind(h,pooled) +  h   #pooled + h  #self.bind(h,pooled) + #
-            else:
-                
-                pooled = pooled+h
+                pooled = pooled + h
+            pooled = torch.roll(pooled, shifts=shift, dims=1)
 
-            rotated_matrix = pooled.clone()  # Start with the original matrix
-            shift = 1  # 
-            #### APPLY PERMUTATION
-            # inverse_permutation = self.invert_permutation(permutation)
-
-            # for _ in range( shift): #layer + 1
-            #     rotated_matrix = rotated_matrix[:, inverse_permutation]  # Apply permutation multiple times
-
-            #### APPLY ROTATION
-            # Circularly shift columns
-            rotated_matrix = torch.roll(rotated_matrix, shifts=shift, dims=1)
-            pooled = rotated_matrix
-        # print(pooled)
-        # pooled = F.normalize(pooled, p=2, dim=1)
-        # print()
         pooled = torch.sign(pooled)
-        # pooled = torch.relu(pooled)
-        # pooled = torch.tanh(pooled)
-        # pooled=torch.clamp(pooled, min=-1, max=1) 
         return pooled
 
 
 
 
     def forward(self, batch_graph, return_embedding=False):
-        X_concat = torch.cat([graph.node_features for graph in batch_graph], 0).to(self.device)
+        X_concat = torch.cat([g.node_features for g in batch_graph], 0).to(self.device)
         graph_pool = self.__preprocess_graphpool(batch_graph)
-        # print("equation :", self.equation)
-
         Adj_block = self.__preprocess_neighbors_sumavepool(batch_graph)
-        
-        # print(Adj_block)
-        # # #list of hidden representation at each layer (including input)
+
+        batched_ei, batched_ea, start_idx = self.__preprocess_edges(batch_graph)
+        num_nodes = start_idx[-1]
+        edge_index = None
+        edge_H = None
+        if batched_ei is not None and batched_ea is not None and self.edge_feat_dim > 0 and hasattr(self, "W_edge"):
+            edge_index = batched_ei
+            edge_H = torch.mm(batched_ea.to(X_concat.dtype), self.W_edge)
+
         hidden_rep = [X_concat]
         h = X_concat
-        # print(h)
-        # print("\n")
-        for layer in range(self.num_layers-1):
-            h = self.next_layer_eps(h, layer, Adj_block = Adj_block, delta = self.delta, equation = self.equation)
+        for layer in range(self.num_layers - 1):
+            h = self.next_layer_eps(
+                h, layer,
+                Adj_block=Adj_block,
+                delta=self.delta,
+                equation=self.equation,
+                edge_index=edge_index,
+                edge_H=edge_H,
+                num_nodes=num_nodes,
+            )
             hidden_rep.append(h)
-            
 
-            
-            
-
-        
-#         score_over_layer = 0
-        pooled_hS =[]
-        #perform pooling over all nodes in each graph in every layer
+        pooled_hS = []
         for layer, h in enumerate(hidden_rep):
-            pooled_h = torch.spmm(graph_pool, h)#*(1/float(layer+1))
-            pooled_hS .append(pooled_h)
-            
-
-        
+            pooled_h = torch.spmm(graph_pool, h)
+            pooled_hS.append(pooled_h)
         return torch.stack(pooled_hS, dim=0)
 
     
