@@ -5,6 +5,7 @@ import networkx as nx
 from torch_geometric.data import Data
 import numpy as np
 from rdkit.Chem import AllChem
+from rdkit.Chem import rdMolDescriptors
 
 def _bond_stereo_to_float(stereo):
     """Map RDKit BondStereo to scalar: 0=None, 1=CIS, 2=TRANS, 3=Z, 4=E."""
@@ -44,7 +45,12 @@ def bond_node_features_geognn(bond, pos):
 
     stereo = _bond_stereo_to_float(bond.GetStereo())
 
-    return np.array([bond_type, is_conjugated, in_ring, length, stereo], dtype=np.float32)
+    return np.array([bond_type, 
+                    is_conjugated, 
+                    in_ring 
+                    # length, 
+                    # stereo
+                    ], dtype=np.float32)
 '''
 def build_edge_features_geognn_for_atom_graph(data, mol):
     """
@@ -225,11 +231,61 @@ def expand_atomic_features(data, mol):
     chirality    = torch.zeros((num_nodes, 2))       # [R, S] placeholder
     num_attached_h = torch.zeros((num_nodes, 1))     # number of H attached to each atom
 
+    # New: Gasteiger partial charge, Crippen logP, TPSA, aromatic ring, ring size
+    gasteiger_charge = torch.zeros((num_nodes, 1))
+    crippen_logp = torch.zeros((num_nodes, 1))
+    tpsa_contrib = torch.zeros((num_nodes, 1))
+    is_in_aromatic_ring = torch.zeros((num_nodes, 1))
+    smallest_ring_size = torch.zeros((num_nodes, 1))
+
     mol_h = Chem.RWMol(mol)
     try:
         Chem.SanitizeMol(mol_h)
         for i in range(num_nodes):
             num_attached_h[i] = float(mol_h.GetAtomWithIdx(i).GetTotalNumHs())
+    except Exception:
+        pass
+
+    # Per-atom Gasteiger partial charge
+    try:
+        AllChem.ComputeGasteigerCharges(mol_h, throwOnParamFailure=False)
+        for i in range(num_nodes):
+            if mol_h.GetAtomWithIdx(i).HasProp("_GasteigerCharge"):
+                q = float(mol_h.GetAtomWithIdx(i).GetProp("_GasteigerCharge"))
+                gasteiger_charge[i] = q if not (np.isnan(q) or np.isinf(q)) else 0.0
+    except Exception:
+        pass
+
+    # Per-atom Crippen logP and TPSA contributions
+    try:
+        crippen_contribs = rdMolDescriptors._CalcCrippenContribs(mol_h)
+        for i, (logp, _) in enumerate(crippen_contribs):
+            if i < num_nodes:
+                crippen_logp[i] = float(logp) if not (np.isnan(logp) or np.isinf(logp)) else 0.0
+    except Exception:
+        pass
+
+    try:
+        tpsa_contribs = rdMolDescriptors._CalcTPSAContribs(mol_h)
+        for i, tpsa in enumerate(tpsa_contribs):
+            if i < num_nodes:
+                tpsa_contrib[i] = float(tpsa) if not (np.isnan(tpsa) or np.isinf(tpsa)) else 0.0
+    except Exception:
+        pass
+
+    # Is in aromatic ring and smallest ring size
+    try:
+        ri = mol_h.GetRingInfo()
+        atom_ring_sizes = {}
+        for ring in ri.AtomRings():
+            size = len(ring)
+            for aid in ring:
+                if aid not in atom_ring_sizes or size < atom_ring_sizes[aid]:
+                    atom_ring_sizes[aid] = size
+        for i in range(num_nodes):
+            atom = mol_h.GetAtomWithIdx(i)
+            is_in_aromatic_ring[i] = float(atom.GetIsAromatic())
+            smallest_ring_size[i] = float(atom_ring_sizes.get(i, 0))
     except Exception:
         pass
 
@@ -429,6 +485,11 @@ def expand_atomic_features(data, mol):
                                    hbond_flags,
                                    chirality,
                                    num_attached_h,
+                                   gasteiger_charge,
+                                   crippen_logp,
+                                   tpsa_contrib,
+                                   is_in_aromatic_ring,
+                                   smallest_ring_size,
                                    ), dim=1)
     # print("valence_electrons ", valence_electrons)
     # print("hybridization ", hybridization)
