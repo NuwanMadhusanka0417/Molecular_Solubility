@@ -36,18 +36,21 @@ device = torch.device('cpu')
 
 dims = [1000, 2000, 5000, 10000]
 
+# projection_type: "orthogonal" (info-preserving) or "gaussian"
+# edge_projection_type: same for GraphCNN edge_attr -> HV (single place for edge conditioning)
 for dim in dims:
     train_graphs = create_graph_list(train_data)
     test_graphs = create_graph_list(test_data)
     ts_graph = test_graphs.copy()
     tr_graph = train_graphs.copy()
-    test_HVs = VSA_conversion(ts_graph, dim)
-    train_HVs = VSA_conversion(tr_graph, dim)
+    test_HVs = VSA_conversion(ts_graph, dim, projection_type="orthogonal")
+    train_HVs = VSA_conversion(tr_graph, dim, projection_type="orthogonal")
 
     model_eq1 = GraphCNN(
         test_HVs[0].node_features.shape[1], num_layers, delta_eq1,
         graph_pooling_type, neighbor_pooling_type, device, equation_eq1,
         edge_feat_dim=5,
+        edge_projection_type="orthogonal",
     )
     train_embeddings_eq1, train_labels_eq1 = getEmbedding(model_eq1, device, train_HVs)
     test_embeddings_eq1, test_labels_eq1 = getEmbedding(model_eq1, device, test_HVs)

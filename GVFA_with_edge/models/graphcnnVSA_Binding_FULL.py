@@ -8,7 +8,7 @@ sys.path.append("models/")
 from models.mlp import MLP
 
 class GraphCNN(nn.Module):
-    def __init__(self, input_dim, num_layers, delta, graph_pooling_type, neighbor_pooling_type, device, equation, edge_feat_dim=5):
+    def __init__(self, input_dim, num_layers, delta, graph_pooling_type, neighbor_pooling_type, device, equation, edge_feat_dim=5, edge_projection_type="orthogonal"):
         '''
             num_layers: number of layers (INCLUDING input)
             input_dim: node HV dim D
@@ -17,6 +17,7 @@ class GraphCNN(nn.Module):
             graph_pooling_type: sum or average
             device: device
             edge_feat_dim: raw edge feature dim; 0 = no edge conditioning
+            edge_projection_type: "orthogonal" (info-preserving) or "gaussian" for edge_attr -> HV
         '''
 
         super(GraphCNN, self).__init__()
@@ -32,7 +33,14 @@ class GraphCNN(nn.Module):
 
         if self.edge_feat_dim > 0:
             g = torch.Generator().manual_seed(0)
-            W_edge = torch.randn(self.edge_feat_dim, input_dim, generator=g) / math.sqrt(self.edge_feat_dim)
+            W_edge = torch.randn(self.edge_feat_dim, input_dim, generator=g)
+            if edge_projection_type == "orthogonal" and input_dim >= self.edge_feat_dim:
+                # Orthonormal columns: preserves norms of projected edge vectors (info-preserving)
+                A = torch.randn(input_dim, self.edge_feat_dim, generator=g)
+                Q, _ = torch.linalg.qr(A)
+                W_edge = Q[:, :self.edge_feat_dim].T  # (edge_feat_dim, input_dim)
+            else:
+                W_edge = W_edge / math.sqrt(self.edge_feat_dim)
             self.register_buffer("W_edge", W_edge)
 
     def __preprocess_neighbors_sumavepool(self, batch_graph):

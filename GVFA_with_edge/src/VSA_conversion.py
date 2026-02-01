@@ -51,69 +51,55 @@ def vsa_message_passing(node_H, edge_H, edge_index, alpha=1.0):
 
     return updated
 
-def project_with_vsa(g_list, new_dim):
+def _random_projection_matrix(in_dim, out_dim, orthogonal=False, seed=0):
     """
-    Project node & edge features to hypervectors and run
-    one VSA message passing step using edge_index.
+    Build shared random projection W: (in_dim, out_dim).
+    - orthogonal=True: QR-based orthonormal columns → better preserves norms (info-preserving).
+    - orthogonal=False: standard Gaussian / sqrt(in_dim) (JL-style).
     """
-    # Set a random seed for reproducibility *per dim*
-    torch.manual_seed(0)
-
-    # node feature dim
-    F_node = g_list[0].node_features.shape[1]
-
-    # shared random projection for nodes
-    W_node = torch.randn(F_node, new_dim) / math.sqrt(F_node)
-
-    # check if we have usable edge features & edge_index
-    has_edges = (
-        hasattr(g_list[0], "edge_attr")
-        and g_list[0].edge_attr is not None
-        and g_list[0].edge_attr.numel() > 0
-        and hasattr(g_list[0], "edge_index")
-        and g_list[0].edge_index is not None
-    )
-
-    if has_edges:
-        F_edge = g_list[0].edge_attr.shape[1]
-        W_edge = torch.randn(F_edge, new_dim) / math.sqrt(F_edge)
+    g = torch.Generator().manual_seed(seed)
+    W = torch.randn(in_dim, out_dim, generator=g)
+    if orthogonal and out_dim <= in_dim:
+        # Orthonormal columns: preserves ||x|| when out_dim >= in_dim; minimizes distortion when out_dim < in_dim
+        Q, _ = torch.linalg.qr(W)
+        W = Q[:, :out_dim]
     else:
-        W_edge = None
+        W = W / math.sqrt(in_dim)
+    return W
 
-    print("VSA_conversion: node feature dim =", F_node, "new_dim =", new_dim)
-    if has_edges:
-        print("VSA_conversion: edge feature dim =", g_list[0].edge_attr.shape[1])
+
+def project_with_vsa(g_list, new_dim, projection_type="orthogonal"):
+    """
+    Project node features to hypervectors only.
+
+    Edge conditioning is done solely in GraphCNN (single projection + FFT binding)
+    so edge_attr is not projected or used here.
+
+    projection_type: "orthogonal" (default) = orthonormal random projection, better
+        preserves norms and distances; "gaussian" = standard JL-style random projection.
+    """
+    torch.manual_seed(0)
+    F_node = g_list[0].node_features.shape[1]
+    use_orthogonal = projection_type == "orthogonal"
+    W_node = _random_projection_matrix(F_node, new_dim, orthogonal=use_orthogonal, seed=0)
+
+    print("VSA_conversion: node feature dim =", F_node, "new_dim =", new_dim,
+          "projection =", projection_type)
 
     for g in g_list:
-        # ---- 1) Project node features to HVs ----
         X = g.node_features  # [N, F_node]
         node_H = torch.matmul(X, W_node)  # [N, D]
-        # node_H = torch.sign(node_H)
-        # node_H[node_H == 0] = 1.0
-
-        # ---- 2) If we have edge features, do edge-aware message passing ----
-        if has_edges:
-            E_attr = g.edge_attr           # [E, F_edge]
-            edge_H = torch.matmul(E_attr, W_edge)  # [E, D]
-            # edge_H = torch.sign(edge_H)
-            # edge_H[edge_H == 0] = 1.0
-
-            edge_index = g.edge_index      # [2, E]
-            node_H = vsa_message_passing(node_H, edge_H, edge_index, alpha=1.0)
-
-        # ---- 3) Store updated node HVs back into the graph ----
         g.node_features = node_H
 
     print("g list item shape after VSA:", g_list[0].node_features.shape)
     return g_list
 
-def VSA_conversion(g_list, new_dim=None):
+def VSA_conversion(g_list, new_dim=None, projection_type="orthogonal"):
     """
-    Original function, now upgraded:
+    Build neighbors & edge_mat for GraphCNN. If new_dim is set, project node
+    features to HVs only (edge conditioning is done solely in GraphCNN).
 
-    - still builds neighbors & edge_mat for GraphCNN;
-    - if new_dim is given, it uses project_with_vsa to
-      create hypervectors + edge-aware message passing.
+    projection_type: "orthogonal" (info-preserving) or "gaussian".
     """
     # Build neighbors and edge_mat; use edge_index when available (aligns with edge_attr)
     for g in g_list:
@@ -138,8 +124,7 @@ def VSA_conversion(g_list, new_dim=None):
     if not new_dim:
         return g_list
 
-    # Otherwise project with VSA + GNN-style edge-aware message passing
-    g_list = project_with_vsa(g_list, new_dim)
+    g_list = project_with_vsa(g_list, new_dim, projection_type=projection_type)
     return g_list
 '''
 def project_node_features(g_list, original_feature_dim, new_dim):
