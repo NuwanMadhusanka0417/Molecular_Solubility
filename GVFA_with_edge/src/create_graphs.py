@@ -485,11 +485,11 @@ def expand_atomic_features(data, mol):
                                    hbond_flags,
                                    chirality,
                                    num_attached_h,
-                                   gasteiger_charge,
-                                   crippen_logp,
-                                   tpsa_contrib,
-                                   is_in_aromatic_ring,
-                                   smallest_ring_size,
+                                #    gasteiger_charge,
+                                #    crippen_logp,
+                                #    tpsa_contrib,
+                                #    is_in_aromatic_ring,
+                                #    smallest_ring_size,
                                    ), dim=1)
     # print("valence_electrons ", valence_electrons)
     # print("hybridization ", hybridization)

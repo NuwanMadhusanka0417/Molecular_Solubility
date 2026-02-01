@@ -31,6 +31,7 @@ delta_eq1 = 1
 equation_eq1 = 10
 graph_pooling_type = 'sum'  # sum, average
 neighbor_pooling_type = 'sum' # sum, average, max
+hop_alpha = 0.8  # Topologically decaying hop weights: weights = alpha ** layer_ids (1.0 = no decay)
 device = 1  # help='if delta is 1 will be the model with binding, if 0 model will have be without binding (default: 1)'
 device = torch.device('cpu')
 
@@ -53,8 +54,13 @@ for dim in dims:
         edge_projection_type="orthogonal",
     )
     # use_size_aware=True: scale by 1/√(num_nodes) per layer + append num_nodes as extra feature (D+1 for XGBoost)
-    train_embeddings_eq1, train_labels_eq1 = getEmbedding(model_eq1, device, train_HVs, use_size_aware=True)
-    test_embeddings_eq1, test_labels_eq1 = getEmbedding(model_eq1, device, test_HVs, use_size_aware=True)
+    # hop_alpha: topologically decaying hop weights (1.0 = all layers equal)
+    train_embeddings_eq1, train_labels_eq1 = getEmbedding(
+        model_eq1, device, train_HVs, use_size_aware=True, hop_alpha=hop_alpha
+    )
+    test_embeddings_eq1, test_labels_eq1 = getEmbedding(
+        model_eq1, device, test_HVs, use_size_aware=True, hop_alpha=hop_alpha
+    )
 
     train_embeddings_eq1 = train_embeddings_eq1.squeeze(0)  # [N_train, D] or [N_train, D+1]
     test_embeddings_eq1 = test_embeddings_eq1.squeeze(0)     # [N_test, D] or [N_test, D+1]

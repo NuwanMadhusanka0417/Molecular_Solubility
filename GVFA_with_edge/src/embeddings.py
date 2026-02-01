@@ -1,6 +1,6 @@
 import torch
 
-def getEmbedding(model, device, train_graphs, batch_size=100, SUM=True, use_size_aware=True):
+def getEmbedding(model, device, train_graphs, batch_size=100, SUM=True, use_size_aware=True, hop_alpha=1.0):
     """
     Get graph-level embeddings for regression.
 
@@ -9,6 +9,11 @@ def getEmbedding(model, device, train_graphs, batch_size=100, SUM=True, use_size
            molecules don't dominate the sum-pooled representation.
         2) Append num_nodes as an extra feature (last column). XGBoost then gets D+1
            dimensions; the last is atom count, which is important for solubility.
+
+    hop_alpha: topologically decaying hop weights. When combining layers, applies
+        weights = alpha ** layer_ids so nearer hops (lower layer_id) get higher weight.
+        hop_alpha=1.0 (default) means all layers weighted equally (original behavior).
+        hop_alpha<1 (e.g. 0.9) decays weight with hop distance.
     """
     model.to(device)
     model.train()
@@ -36,7 +41,13 @@ def getEmbedding(model, device, train_graphs, batch_size=100, SUM=True, use_size
             output = output / scale
 
         if SUM:
-            combined_embedding = output.sum(dim=0, keepdim=True)  # [1, batch_size, D]
+            # Topologically decaying hop weights: weights = alpha ** layer_ids
+            num_layers_out = output.shape[0]
+            layer_ids = torch.arange(
+                num_layers_out, dtype=output.dtype, device=output.device
+            )
+            weights = (hop_alpha ** layer_ids).view(-1, 1, 1)  # [num_layers, 1, 1]
+            combined_embedding = (output * weights).sum(dim=0, keepdim=True)  # [1, batch_size, D]
         else:
             combined_embedding = torch.cat(output, dim=1)
 
