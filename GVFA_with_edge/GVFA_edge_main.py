@@ -52,12 +52,12 @@ for dim in dims:
         edge_feat_dim=5,
         edge_projection_type="orthogonal",
     )
-    train_embeddings_eq1, train_labels_eq1 = getEmbedding(model_eq1, device, train_HVs)
-    test_embeddings_eq1, test_labels_eq1 = getEmbedding(model_eq1, device, test_HVs)
+    # use_size_aware=True: scale by 1/√(num_nodes) per layer + append num_nodes as extra feature (D+1 for XGBoost)
+    train_embeddings_eq1, train_labels_eq1 = getEmbedding(model_eq1, device, train_HVs, use_size_aware=True)
+    test_embeddings_eq1, test_labels_eq1 = getEmbedding(model_eq1, device, test_HVs, use_size_aware=True)
 
-    train_embeddings_eq1 = train_embeddings_eq1.squeeze(0)
-
-    test_embeddings_eq1 = test_embeddings_eq1.squeeze(0)
+    train_embeddings_eq1 = train_embeddings_eq1.squeeze(0)  # [N_train, D] or [N_train, D+1]
+    test_embeddings_eq1 = test_embeddings_eq1.squeeze(0)     # [N_test, D] or [N_test, D+1]
 
     # print(len(test_graphs))
     # print(test_graphs[0].node_features)
