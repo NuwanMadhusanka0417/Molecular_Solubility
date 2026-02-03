@@ -47,9 +47,9 @@ def bond_node_features_geognn(bond, pos):
 
     return np.array([bond_type, 
                     is_conjugated, 
-                    in_ring 
-                    # length, 
-                    # stereo
+                    in_ring, 
+                    length, 
+                    stereo
                     ], dtype=np.float32)
 '''
 def build_edge_features_geognn_for_atom_graph(data, mol):
@@ -479,17 +479,20 @@ def expand_atomic_features(data, mol):
 
 
     
-    enhanced_features = torch.cat((atomic_numbers, degrees, 
-                                   valence_electrons, hybridization, aromaticity,
+    enhanced_features = torch.cat((atomic_numbers, 
+                                    degrees, 
+                                   valence_electrons, 
+                                    hybridization, 
+                                    aromaticity,
                                    formal_charge,
                                    hbond_flags,
                                    chirality,
                                    num_attached_h,
-                                #    gasteiger_charge,
-                                #    crippen_logp,
-                                #    tpsa_contrib,
-                                #    is_in_aromatic_ring,
-                                #    smallest_ring_size,
+                                   gasteiger_charge,
+                                   crippen_logp,
+                                   tpsa_contrib,
+                                   is_in_aromatic_ring,
+                                   smallest_ring_size,
                                    ), dim=1)
     # print("valence_electrons ", valence_electrons)
     # print("hybridization ", hybridization)
