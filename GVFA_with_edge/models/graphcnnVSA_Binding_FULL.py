@@ -8,7 +8,7 @@ sys.path.append("models/")
 from models.mlp import MLP
 
 class GraphCNN(nn.Module):
-    def __init__(self, input_dim, num_layers, delta, graph_pooling_type, neighbor_pooling_type, device, equation, edge_feat_dim=5, edge_projection_type="orthogonal"):
+    def __init__(self, input_dim, num_layers, delta, graph_pooling_type, neighbor_pooling_type, device, equation, edge_feat_dim=5, edge_projection_type="orthogonal", use_resonator=False, resonator_iters=7, resonator_beta=0.75):
         '''
             num_layers: number of layers (INCLUDING input)
             input_dim: node HV dim D
@@ -18,6 +18,9 @@ class GraphCNN(nn.Module):
             device: device
             edge_feat_dim: raw edge feature dim; 0 = no edge conditioning
             edge_projection_type: "orthogonal" (info-preserving) or "gaussian" for edge_attr -> HV
+            use_resonator: if True, apply resonator consensus to refine final layer (denoise via neighbor agreement)
+            resonator_iters: iterations for resonator (5-10 typical)
+            resonator_beta: mixing factor 0.7-0.85 (higher = more stability)
         '''
 
         super(GraphCNN, self).__init__()
@@ -30,6 +33,9 @@ class GraphCNN(nn.Module):
         self.delta = delta
         self.equation = equation
         self.edge_feat_dim = edge_feat_dim if edge_feat_dim else 0
+        self.use_resonator = use_resonator
+        self.resonator_iters = resonator_iters
+        self.resonator_beta = resonator_beta
 
         if self.edge_feat_dim > 0:
             g = torch.Generator().manual_seed(0)
@@ -165,6 +171,44 @@ class GraphCNN(nn.Module):
 
         # Return the real part of the result as the final bound hypervectors
         return torch.real(result)
+
+    def resonator_consensus(self, node_H, edge_H, edge_index, iterations=7, beta=0.75):
+        """
+        Iterative resonator network to reach stable consensus states.
+        Denoises and stabilizes node representations through neighbor agreement.
+
+        node_H: [N, D] node hypervectors
+        edge_H: [E, D] edge hypervectors
+        edge_index: [2, E] (src, dst) - messages flow src -> dst
+        beta: mixing factor (0.7-0.85 recommended). Higher = more stability.
+        iterations: 5-10 typically sufficient.
+
+        Returns: [N, D] refined node features
+        """
+        N, D = node_H.shape
+        E = edge_index.shape[1]
+        device = node_H.device
+        dtype = node_H.dtype
+
+        current = node_H.clone()
+        src, dst = edge_index[0], edge_index[1]
+
+        for _ in range(iterations):
+            messages = torch.zeros_like(current)
+            neighbor_h = current[src]  # [E, D] - use current refined state
+            msg = self.bind(edge_H, neighbor_h)  # bind edge with sender state
+            messages.index_add_(0, dst, msg)
+
+            # Normalize incoming messages (avoid div by zero for isolated nodes)
+            msg_norm = messages.norm(p=2, dim=1, keepdim=True).clamp(min=1e-8)
+            messages = messages / msg_norm
+
+            # Resonator update: mix old state with neighbor consensus
+            current = beta * current + (1 - beta) * messages
+            curr_norm = current.norm(p=2, dim=1, keepdim=True).clamp(min=1e-8)
+            current = current / curr_norm
+
+        return current
     def invert_permutation(self, perm):
         """Generate the inverse of a permutation."""
         inverse = [0] * len(perm)
@@ -253,6 +297,14 @@ class GraphCNN(nn.Module):
                 num_nodes=num_nodes,
             )
             hidden_rep.append(h)
+
+        # Resonator consensus: refine final layer through neighbor agreement (denoise, stabilize)
+        if self.use_resonator and edge_index is not None and edge_H is not None:
+            hidden_rep[-1] = self.resonator_consensus(
+                hidden_rep[-1], edge_H, edge_index,
+                iterations=self.resonator_iters,
+                beta=self.resonator_beta,
+            )
 
         pooled_hS = []
         for layer, h in enumerate(hidden_rep):

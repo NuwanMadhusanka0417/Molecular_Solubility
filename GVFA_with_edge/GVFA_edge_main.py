@@ -32,6 +32,9 @@ equation_eq1 = 10
 graph_pooling_type = 'sum'  # sum, average
 neighbor_pooling_type = 'sum' # sum, average, max
 hop_alpha = 0.8  # Topologically decaying hop weights: weights = alpha ** layer_ids (1.0 = no decay)
+use_resonator = True  # Resonator consensus: denoise final layer via neighbor agreement (5-15% expected improvement)
+resonator_iters = 7
+resonator_beta = 0.75
 device = 1  # help='if delta is 1 will be the model with binding, if 0 model will have be without binding (default: 1)'
 device = torch.device('cpu')
 
@@ -52,6 +55,9 @@ for dim in dims:
         graph_pooling_type, neighbor_pooling_type, device, equation_eq1,
         edge_feat_dim=5,
         edge_projection_type="orthogonal",
+        use_resonator=use_resonator,
+        resonator_iters=resonator_iters,
+        resonator_beta=resonator_beta,
     )
     # use_size_aware=True: scale by 1/√(num_nodes) per layer + append num_nodes as extra feature (D+1 for XGBoost)
     # hop_alpha: topologically decaying hop weights (1.0 = all layers equal)
