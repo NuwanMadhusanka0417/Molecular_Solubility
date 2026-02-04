@@ -28,7 +28,8 @@ test_graphs = create_graph_list(test_data)
 
 num_layers = 5
 delta_eq1 = 1
-equation_eq1 = 10
+# equation: 10,11=original | 12=adaptive rotation | 13=edge strength | 14=directional | 15=full (recommended: 12 or 13)
+equation_eq1 = 12
 graph_pooling_type = 'sum'  # sum, average
 neighbor_pooling_type = 'sum' # sum, average, max
 hop_alpha = 0.8  # Topologically decaying hop weights: weights = alpha ** layer_ids (1.0 = no decay)

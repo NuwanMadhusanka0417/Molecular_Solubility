@@ -1,3 +1,16 @@
+"""
+GraphCNN with VSA binding and multiple equation variants.
+
+Equations (parameter `equation`):
+  10: Original - rotate(h), pool, output = bind(h, pooled) + h (fixed shift=1).
+  11: Original - pool(h), then rotate; bind+residual.
+  12: Adaptive rotation - shift = 1 + layer (better k-hop distinction). Expected +5-8%.
+  13: Edge strength - weight messages by bond_type/conjugated/in_ring/length. Expected +10-15%.
+  14: Directional binding - src/dst rotations, triple bind. Expected +8-12%.
+  15: Full - directional + edge strength + attention-like aggregation. Expected +15-25%.
+
+Recommended: start with 12 (zero cost); then 13 for solubility (edge features matter).
+"""
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -185,11 +198,143 @@ class GraphCNN(nn.Module):
             pooled = pooled / degree
         return pooled
 
+    def _compute_edge_strengths(self, edge_attr_raw):
+        """
+        Compute edge importance from raw features [bond_type, conjugated, in_ring, length?, stereo?].
+        Returns [E] tensor of strength values in [0.5, 1.5].
+        """
+        E = edge_attr_raw.shape[0]
+        device = edge_attr_raw.device
+        dtype = edge_attr_raw.dtype
+        if edge_attr_raw.shape[1] >= 5:
+            bond_type = edge_attr_raw[:, 0] / 4.0
+            conjugated = edge_attr_raw[:, 1]
+            in_ring = edge_attr_raw[:, 2]
+            length = edge_attr_raw[:, 3].clamp(min=1e-6)
+            stereo = edge_attr_raw[:, 4] / 4.0
+            strength = (
+                0.35 * (1.0 + bond_type)
+                + 0.20 * conjugated
+                + 0.15 * in_ring
+                + 0.20 * (1.5 / (1.0 + length))
+                + 0.10 * stereo
+            )
+            strength = 0.5 + torch.sigmoid(strength - 0.5)
+        elif edge_attr_raw.shape[1] >= 3:
+            bond_type = edge_attr_raw[:, 0] / 4.0 if edge_attr_raw.shape[1] > 0 else 0.0
+            conjugated = edge_attr_raw[:, 1] if edge_attr_raw.shape[1] > 1 else 0.0
+            in_ring = edge_attr_raw[:, 2] if edge_attr_raw.shape[1] > 2 else 0.0
+            strength = 0.35 * (1.0 + bond_type) + 0.30 * conjugated + 0.25 * in_ring
+            strength = 0.5 + torch.sigmoid(strength - 0.5)
+        else:
+            strength = torch.ones(E, device=device, dtype=dtype)
+        return strength
+
     def next_layer_eps(self, h, layer, padded_neighbor_list=None, Adj_block=None, delta=1, equation=10,
-                       edge_index=None, edge_H=None, num_nodes=None):
-        shift = 1
+                       edge_index=None, edge_H=None, num_nodes=None, edge_attr_raw=None):
+        """
+        Dispatch to equation variant. equation: 10,11 (original), 12 (adaptive rotation),
+        13 (edge strength), 14 (directional), 15 (full improvements).
+        """
         torch.manual_seed(0)
 
+        # Equation 12: Adaptive rotation (shift = 1 + layer)
+        if equation == 12:
+            shift = 1 + layer
+            rotated = torch.roll(h.clone(), shifts=shift, dims=1)
+            pooled = self._pool_neighbors(rotated, Adj_block, padded_neighbor_list, edge_index, edge_H, num_nodes)
+            output = self.bind(h, pooled) + h
+            return torch.sign(output)
+
+        # Equation 13: Edge-strength modulated message passing
+        if equation == 13:
+            shift = 1 + layer
+            if edge_index is not None and edge_H is not None and num_nodes is not None:
+                E, D = edge_index.shape[1], h.shape[1]
+                src, dst = edge_index[0], edge_index[1]
+                rotated = torch.roll(h.clone(), shifts=shift, dims=1)
+                neighbor_h = rotated[src]
+                edge_H_mod = edge_H * self._compute_edge_strengths(edge_attr_raw).unsqueeze(1) if edge_attr_raw is not None else edge_H
+                messages = self.bind(neighbor_h, edge_H_mod)
+                pooled = torch.zeros(num_nodes, D, device=h.device, dtype=h.dtype)
+                pooled.index_add_(0, dst, messages)
+                if self.neighbor_pooling_type == "average":
+                    degree = torch.zeros(num_nodes, 1, device=h.device, dtype=h.dtype)
+                    degree.index_add_(0, dst.unsqueeze(1), torch.ones(E, 1, device=h.device, dtype=h.dtype))
+                    degree = degree.clamp(min=1.0)
+                    pooled = pooled / degree
+            else:
+                rotated = torch.roll(h.clone(), shifts=shift, dims=1)
+                pooled = self._pool_neighbors(rotated, Adj_block, padded_neighbor_list, edge_index, edge_H, num_nodes)
+            output = self.bind(h, pooled) + h
+            return torch.sign(output)
+
+        # Equation 14: Directional binding (src/dst rotations)
+        if equation == 14:
+            shift_src = 1 + layer * 2
+            shift_dst = -(1 + layer * 2)
+            if edge_index is not None and edge_H is not None and num_nodes is not None:
+                E, D = edge_index.shape[1], h.shape[1]
+                src, dst = edge_index[0], edge_index[1]
+                h_src = torch.roll(h[src], shifts=shift_src, dims=1)
+                h_dst = torch.roll(h[dst], shifts=shift_dst, dims=1)
+                edge_H_mod = edge_H * self._compute_edge_strengths(edge_attr_raw).unsqueeze(1) if edge_attr_raw is not None else edge_H
+                messages = self.bind(h_src, edge_H_mod)
+                messages = self.bind(messages, h_dst)
+                pooled = torch.zeros(num_nodes, D, device=h.device, dtype=h.dtype)
+                pooled.index_add_(0, dst, messages)
+                if self.neighbor_pooling_type == "average":
+                    degree = torch.zeros(num_nodes, 1, device=h.device, dtype=h.dtype)
+                    degree.index_add_(0, dst.unsqueeze(1), torch.ones(E, 1, device=h.device, dtype=h.dtype))
+                    degree = degree.clamp(min=1.0)
+                    pooled = pooled / degree
+            else:
+                rotated = torch.roll(h.clone(), shifts=shift_src, dims=1)
+                pooled = self._pool_neighbors(rotated, Adj_block, padded_neighbor_list, edge_index, edge_H, num_nodes)
+            output = pooled + h
+            return torch.sign(output)
+
+        # Equation 15: Full improvements (directional + edge strength + attention-like aggregation)
+        if equation == 15:
+            shift = 1 + layer
+            if edge_index is not None and edge_H is not None and num_nodes is not None:
+                E, D = edge_index.shape[1], h.shape[1]
+                src, dst = edge_index[0], edge_index[1]
+                h_src = torch.roll(h[src], shifts=shift, dims=1)
+                h_dst = torch.roll(h[dst], shifts=-shift, dims=1)
+                strengths = self._compute_edge_strengths(edge_attr_raw) if edge_attr_raw is not None else torch.ones(E, device=h.device, dtype=h.dtype)
+                edge_H_mod = edge_H * strengths.unsqueeze(1)
+                messages = self.bind(h_src, edge_H_mod)
+                messages = self.bind(messages, h_dst)
+                receiver_hvs = h[dst]
+                similarities = F.cosine_similarity(messages, receiver_hvs, dim=1)
+                attention_logits = similarities * strengths
+                attention_weights = torch.zeros(E, device=h.device, dtype=h.dtype)
+                for node in range(num_nodes):
+                    mask = (dst == node)
+                    if mask.any():
+                        logits = attention_logits[mask]
+                        attention_weights[mask] = F.softmax(logits * 3.0, dim=0)
+                weighted_messages = messages * attention_weights.unsqueeze(1)
+                pooled_sum = torch.zeros(num_nodes, D, device=h.device, dtype=h.dtype)
+                pooled_sum.index_add_(0, dst, weighted_messages)
+                degree = torch.zeros(num_nodes, 1, device=h.device, dtype=h.dtype)
+                degree.index_add_(0, dst.unsqueeze(1), torch.ones(E, 1, device=h.device, dtype=h.dtype))
+                degree = degree.clamp(min=1.0)
+                pooled_mean = pooled_sum / degree
+                degree_norm = torch.clamp(degree / 10.0, 0.0, 1.0)
+                alpha = 0.5 * (1.0 - 0.5 * degree_norm)
+                pooled = alpha * pooled_sum + (1.0 - alpha) * pooled_mean
+            else:
+                rotated = torch.roll(h.clone(), shifts=shift, dims=1)
+                pooled = self._pool_neighbors(rotated, Adj_block, padded_neighbor_list, edge_index, edge_H, num_nodes)
+            gate = torch.sigmoid(torch.norm(pooled, p=2, dim=1, keepdim=True) * 2.0 - 1.0)
+            gate = 0.3 + 0.6 * gate
+            output = h + gate * pooled
+            return torch.sign(output)
+
+        # Original equations 10, 11, and default
+        shift = 1
         if equation == 10:
             rotated = torch.roll(h.clone(), shifts=shift, dims=1)
             pooled = self._pool_neighbors(rotated, Adj_block, padded_neighbor_list, edge_index, edge_H, num_nodes)
@@ -236,9 +381,11 @@ class GraphCNN(nn.Module):
         num_nodes = start_idx[-1]
         edge_index = None
         edge_H = None
+        edge_attr_raw = None
         if batched_ei is not None and batched_ea is not None and self.edge_feat_dim > 0 and hasattr(self, "W_edge"):
             edge_index = batched_ei
-            edge_H = torch.mm(batched_ea.to(X_concat.dtype), self.W_edge)
+            edge_attr_raw = batched_ea.to(X_concat.dtype)
+            edge_H = torch.mm(edge_attr_raw, self.W_edge)
 
         hidden_rep = [X_concat]
         h = X_concat
@@ -251,6 +398,7 @@ class GraphCNN(nn.Module):
                 edge_index=edge_index,
                 edge_H=edge_H,
                 num_nodes=num_nodes,
+                edge_attr_raw=edge_attr_raw,
             )
             hidden_rep.append(h)
 
