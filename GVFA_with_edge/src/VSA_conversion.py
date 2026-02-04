@@ -3,13 +3,15 @@ import torch
 import numpy as np
 import math
 import torch.nn.functional as F
+from torch.fft import fft, ifft
 # import torch
 def hv_bind(a, b):
     """
     Hypervector binding for bipolar HVs: elementwise multiplication.
     a, b: [D]
     """
-    return a * b
+    # return a * b
+    return ifft(fft(a) * fft(b)).real
 
 def vsa_message_passing(node_H, edge_H, edge_index, alpha=1.0):
     """
