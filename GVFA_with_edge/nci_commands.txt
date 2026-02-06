@@ -1,10 +1,19 @@
 nci
 Nuwan@0417
 
-qsub -I  -l walltime=30:00:00,mem=100GB,ncpus=28,jobfs=50GB -P mi23 -l storage=gdata/jq77+scratch/jq77+scratch/mi23
+qsub -I  -l walltime=20:00:00,mem=100GB,ncpus=28,jobfs=50GB -P mi23 -l storage=gdata/jq77+scratch/jq77+scratch/mi23
 
 . /scratch/jq77/nk8155/nv2/bin/activate
 
 cd /g/data/jq77/nuwan/Molecular_Solubility/GVFA/
 
+cd /g/data/jq77/nuwan/Molecular_Solubility/GVFA_with_edge/
+
 python3 GVFA_with_traditional.py --hv_dim 2100
+
+vi GVFA_edge_main.py
+
+python3 GVFA_edge_main.py
+
+
+resonate 7 ---------------------------------
