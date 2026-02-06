@@ -34,9 +34,9 @@ graph_pooling_type = 'sum'  # sum, average
 neighbor_pooling_type = 'sum'  # 'average' reduces degree bias in k-hop (recommended for molecules)
 # Hierarchical k-hop encoding (VSA-style: normalize per hop, prime shift 13*k, then sign)
 use_hier_khop = True
-max_hops = 2  # try 3 for pure hierarchical; avoid double-propagation oversmoothing
+max_hops = 3  # try 3 for pure hierarchical; avoid double-propagation oversmoothing
 hop_alpha = 0.8
-skip_gcnn_after_hier = False  # True = pure hierarchical (no extra GNN layers); try for ablation
+skip_gcnn_after_hier = True  # True = pure hierarchical (no extra GNN layers); try for ablation
 device = 1  # help='if delta is 1 will be the model with binding, if 0 model will have be without binding (default: 1)'
 device = torch.device('cpu')
 
