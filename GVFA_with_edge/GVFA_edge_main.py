@@ -31,12 +31,12 @@ delta_eq1 = 1
 # equation: 10,11=original | 12=adaptive rotation | 13=edge strength | 14=directional | 15=full
 equation_eq1 = 12
 graph_pooling_type = 'sum'  # sum, average
-neighbor_pooling_type = 'sum' # sum, average, max
-# Hierarchical k-hop encoding
+neighbor_pooling_type = 'sum'  # 'average' reduces degree bias in k-hop (recommended for molecules)
+# Hierarchical k-hop encoding (VSA-style: normalize per hop, prime shift 13*k, then sign)
 use_hier_khop = True
-max_hops = 2
+max_hops = 2  # try 3 for pure hierarchical; avoid double-propagation oversmoothing
 hop_alpha = 0.8
-skip_gcnn_after_hier = False
+skip_gcnn_after_hier = False  # True = pure hierarchical (no extra GNN layers); try for ablation
 device = 1  # help='if delta is 1 will be the model with binding, if 0 model will have be without binding (default: 1)'
 device = torch.device('cpu')
 
@@ -99,7 +99,7 @@ for dim in dims:
 
     # ---------- Evaluate ----------
     pred = xgb.predict(test_embeddings_eq1)
-    rmse = mean_squared_error(test_labels_eq1, pred)
+    rmse = mean_squared_error(test_labels_eq1, pred, squared=False)  # RMSE (squared=False); was MSE before
     mae  = mean_absolute_error(test_labels_eq1, pred)
     r2   = r2_score(test_labels_eq1, pred)
 

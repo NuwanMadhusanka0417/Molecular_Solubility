@@ -193,37 +193,44 @@ class GraphCNN(nn.Module):
             pooled = pooled / degree
         return pooled
 
-    def _hier_khop_encode(self, X_concat, edge_index, edge_H, num_nodes, Adj_block):
+    def _hier_khop_encode(self, X_concat, edge_index, edge_H, num_nodes, Adj_block, hop_shift_prime=13, eps=1e-8):
         """
-        Hierarchical k-hop encoding at node level.
-        For k=0..K:
-          - aggregate neighbor info via edge-conditioned binding
-          - apply hop-specific roll (shift=k) to tag hop distance
-          - accumulate with decay lambda_k = hop_alpha^k
+        VSA-consistent hierarchical k-hop encoding at node level.
+        Per hop k:
+          - A^(k)_u = aggregate over neighbors: bind(H^(k-1)_v, b_vu)
+          - normalize: A^(k)_u /= (||A^(k)_u||_2 + eps)
+          - hop tag: S^(k)_u = Roll(A^(k)_u, 13*k)  [prime shift separates hop bands]
+        Bundle with decay: H_enc = sum_k alpha^k S^(k), then harden with sign.
         Returns enriched node HVs [N, D].
         """
-        h_curr = X_concat
         sigs = []
+        # Hop 0: original nodes (optionally L2-normalize for consistency)
+        s0 = X_concat / (X_concat.norm(p=2, dim=1, keepdim=True).clamp(min=eps))
+        sigs.append(torch.roll(s0, shifts=0, dims=1))  # shift 0 for hop 0
 
-        # Hop 0: original nodes
-        sigs.append(X_concat)
-
+        h_curr = X_concat
         for k in range(1, self.max_hops + 1):
             if edge_index is not None and edge_H is not None and num_nodes is not None:
                 avg = (self.neighbor_pooling_type == "average")
                 agg = self._edge_message_pool(h_curr, edge_index, edge_H, num_nodes, average=avg)
             else:
-                # fallback to adjacency pooling
                 agg = self._pool_neighbors(h_curr, Adj_block, None, edge_index, edge_H, num_nodes)
-            # tag hop distance via roll
-            sig_k = torch.roll(agg, shifts=k, dims=1)
+            # Normalize after aggregation (clean HV behavior)
+            agg = agg / (agg.norm(p=2, dim=1, keepdim=True).clamp(min=eps))
+            # Hop-distinct permutation: prime shift separates hop bands (e.g. 13*k)
+            shift = hop_shift_prime * k
+            sig_k = torch.roll(agg, shifts=shift, dims=1)
             sigs.append(sig_k)
             h_curr = agg
 
-        # Weighted sum with decay
+        # Bundle with decay weights
         enriched = torch.zeros_like(X_concat)
         for k, sig in enumerate(sigs):
             enriched = enriched + (self.hop_alpha ** k) * sig
+        # Harden to bipolar HV (same as layer updates)
+        enriched = torch.sign(enriched)
+        # Avoid zeros from sign(0) if needed (optional: set 0 -> 1)
+        enriched[enriched == 0] = 1.0
         return enriched
 
     def next_layer_eps(self, h, layer, padded_neighbor_list=None, Adj_block=None, delta=1, equation=10,
