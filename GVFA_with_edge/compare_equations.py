@@ -1,85 +1,104 @@
 """
-Compare equation variants: 10 (baseline), 12 (adaptive rotation), 13 (edge strength),
-14 (directional), 15 (full). Reports MAE, RMSE, R2 for each.
+DIAGNOSTIC SCRIPT: Find Why Improvements Aren't Working
+========================================================
 
-Recommended order to try: 10 -> 12 -> 13 -> 15. Equation 12 is zero-cost; 13 uses
-edge features; 15 combines all improvements.
+This will help identify the exact problem.
 """
 
+import torch
 from src.create_graphs import create_graph_list
 from src.load_data import load_data
 from src.VSA_conversion import VSA_conversion
-from src.embeddings import getEmbedding
+
+# Load small sample
+train_data, test_data = load_data()
+
+# Create graphs
+train_graphs = create_graph_list(train_data)[:10]  # Just 10 graphs for debugging
+
+print("="*70)
+print("DIAGNOSTIC 1: Check if edge_attr exists and has correct shape")
+print("="*70)
+
+for i, g in enumerate(train_graphs[:3]):
+    print(f"\nGraph {i}:")
+    print(f"  Has edge_attr: {hasattr(g, 'edge_attr')}")
+    if hasattr(g, 'edge_attr'):
+        print(f"  edge_attr shape: {g.edge_attr.shape}")
+        print(f"  edge_attr sample (first 3 edges):\n{g.edge_attr[:3]}")
+        print(f"  edge_attr dtype: {g.edge_attr.dtype}")
+        
+        # Check values
+        print(f"  Bond types (col 0): {g.edge_attr[:3, 0]}")
+        print(f"  Conjugated (col 1): {g.edge_attr[:3, 1]}")
+        print(f"  In ring (col 2): {g.edge_attr[:3, 2]}")
+        print(f"  Length (col 3): {g.edge_attr[:3, 3]}")
+        print(f"  Stereo (col 4): {g.edge_attr[:3, 4]}")
+
+
+print("\n" + "="*70)
+print("DIAGNOSTIC 2: Check after VSA conversion")
+print("="*70)
+
+train_HVs = VSA_conversion(train_graphs.copy(), 1000, projection_type="orthogonal")
+
+for i, g in enumerate(train_HVs[:3]):
+    print(f"\nGraph {i} after VSA_conversion:")
+    print(f"  Has edge_attr: {hasattr(g, 'edge_attr')}")
+    if hasattr(g, 'edge_attr'):
+        print(f"  edge_attr still exists: YES")
+        print(f"  edge_attr shape: {g.edge_attr.shape}")
+    else:
+        print(f"  edge_attr still exists: NO - THIS IS THE PROBLEM!")
+
+
+print("\n" + "="*70)
+print("DIAGNOSTIC 3: Test edge strength computation")
+print("="*70)
+
 from models.graphcnnVSA_Binding_FULL import GraphCNN
-import torch
-from xgboost import XGBRegressor
-from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+
+model = GraphCNN(
+    1000, 3, 1, 'sum', 'sum', torch.device('cpu'), 12,
+    edge_feat_dim=5,
+    use_hier_khop=True,
+    max_hops=3,
+    use_edge_strength=True,
+    use_positional_encoding=True,
+)
+
+# Manually test edge strength computation
+if hasattr(train_HVs[0], 'edge_attr'):
+    test_edge_attr = train_HVs[0].edge_attr[:5]  # First 5 edges
+    print(f"\nTest edge_attr:\n{test_edge_attr}")
+    
+    strengths = model._compute_edge_strengths(test_edge_attr)
+    print(f"\nComputed strengths:\n{strengths}")
+    print(f"Strength range: [{strengths.min():.3f}, {strengths.max():.3f}]")
+    
+    if torch.allclose(strengths, torch.ones_like(strengths)):
+        print("\n❌ PROBLEM: All strengths are 1.0! Edge strength modulation not working!")
+    else:
+        print("\n✅ Edge strength modulation IS working (strengths vary)")
+else:
+    print("\n❌ CRITICAL: edge_attr doesn't exist after VSA_conversion!")
 
 
-def run_eval(equation, dim=5000):
-    train_data, test_data = load_data()
-    train_graphs = create_graph_list(train_data)
-    test_graphs = create_graph_list(test_data)
-    ts_graph = test_graphs.copy()
-    tr_graph = train_graphs.copy()
+print("\n" + "="*70)
+print("DIAGNOSTIC 4: Check GraphCNN preprocessing")
+print("="*70)
 
-    test_HVs = VSA_conversion(ts_graph, dim, projection_type="orthogonal")
-    train_HVs = VSA_conversion(tr_graph, dim, projection_type="orthogonal")
+# Forward pass with single batch
+batch = train_HVs[:2]
 
-    model = GraphCNN(
-        test_HVs[0].node_features.shape[1], num_layers=5, delta=1,
-        graph_pooling_type="sum", neighbor_pooling_type="sum", device=torch.device("cpu"),
-        equation=equation, edge_feat_dim=5, edge_projection_type="orthogonal",
-    )
+print(f"\nInput batch size: {len(batch)}")
+print(f"Graph 0 has edge_attr: {hasattr(batch[0], 'edge_attr')}")
+print(f"Graph 1 has edge_attr: {hasattr(batch[1], 'edge_attr')}")
 
-    train_emb, train_labels = getEmbedding(
-        model, torch.device("cpu"), train_HVs, use_size_aware=True
-    )
-    test_emb, test_labels = getEmbedding(
-        model, torch.device("cpu"), test_HVs, use_size_aware=True
-    )
+# Run forward to see what happens
+output = model(batch)
+print(f"\nOutput shape: {output.shape}")
 
-    train_emb = train_emb.squeeze(0)
-    test_emb = test_emb.squeeze(0)
-
-    xgb = XGBRegressor(
-        n_estimators=2000, learning_rate=0.03, max_depth=7,
-        subsample=0.8, colsample_bytree=0.8, reg_lambda=1.0, reg_alpha=0.0,
-        random_state=42, n_jobs=4, tree_method="hist",
-    )
-    xgb.fit(train_emb, train_labels, eval_set=[(test_emb, test_labels)], verbose=False)
-
-    pred = xgb.predict(test_emb)
-    mae = mean_absolute_error(test_labels, pred)
-    rmse = mean_squared_error(test_labels, pred) ** 0.5
-    r2 = r2_score(test_labels, pred)
-    return mae, rmse, r2
-
-
-def main():
-    dim = 5000
-    equations = [
-        (10, "Baseline (fixed shift, bind+residual)"),
-        (12, "Adaptive rotation (shift=1+layer)"),
-        (13, "Edge strength modulation"),
-        (14, "Directional binding"),
-        (15, "Full (directional + strength + attention)"),
-    ]
-    print("=" * 70)
-    print("Equation comparison (HV dim={})".format(dim))
-    print("=" * 70)
-
-    baseline_mae = None
-    for eq, desc in equations:
-        print("\nEquation {}: {}".format(eq, desc))
-        mae, rmse, r2 = run_eval(eq, dim=dim)
-        if baseline_mae is None:
-            baseline_mae = mae
-        imp = (baseline_mae - mae) / baseline_mae * 100 if baseline_mae else 0
-        print("  MAE={:.4f}  RMSE={:.4f}  R2={:.4f}  vs eq10: {:+.1f}%".format(mae, rmse, r2, imp))
-
-    print("\n" + "=" * 70)
-
-
-if __name__ == "__main__":
-    main()
+print("\n" + "="*70)
+print("DIAGNOSTIC COMPLETE")
+print("="*70)

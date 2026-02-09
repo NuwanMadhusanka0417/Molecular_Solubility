@@ -6,6 +6,7 @@ along the bond. Use "sol" python environment.
 '''
 
 
+from tkinter import FALSE
 from src.create_graphs import create_graph_list
 from src.load_data import load_data
 from src.VSA_conversion import VSA_conversion
@@ -34,9 +35,13 @@ graph_pooling_type = 'sum'  # sum, average
 neighbor_pooling_type = 'sum'  # 'average' reduces degree bias in k-hop (recommended for molecules)
 # Hierarchical k-hop encoding (VSA-style: normalize per hop, prime shift 13*k, then sign)
 use_hier_khop = True
-max_hops = 3  # try 3 for pure hierarchical; avoid double-propagation oversmoothing
+max_hops = 5  # try 3 for pure hierarchical; avoid double-propagation oversmoothing
 hop_alpha = 0.8
 skip_gcnn_after_hier = True  # True = pure hierarchical (no extra GNN layers); try for ablation
+# Optional improvements (expected +10-18% MAE): edge strength, positional encoding, adaptive pooling
+use_edge_strength = True       # Modulate edge_H by bond importance (double/single, conjugated, ring)
+use_positional_encoding = True # Bind degree into initial node features
+use_adaptive_pooling = True   # Mix sum and mean by degree (high degree -> more mean, reduces ring bias)
 device = 1  # help='if delta is 1 will be the model with binding, if 0 model will have be without binding (default: 1)'
 device = torch.device('cpu')
 
@@ -61,6 +66,9 @@ for dim in dims:
         max_hops=max_hops,
         hop_alpha=hop_alpha,
         skip_gcnn_after_hier=skip_gcnn_after_hier,
+        use_edge_strength=use_edge_strength,
+        use_positional_encoding=use_positional_encoding,
+        use_adaptive_pooling=use_adaptive_pooling,
     )
     # use_size_aware=True: scale by 1/√(num_nodes) + append num_nodes as extra feature (D+1 for XGBoost)
     train_embeddings_eq1, train_labels_eq1 = getEmbedding(
