@@ -163,6 +163,11 @@ def build_edge_features_geognn_for_atom_graph(data, mol):
     Returns: torch.FloatTensor [E, 5] or None if 3D embedding fails.
     Uses the *provided* mol (same atom order as data.edge_index) so (u,v) align.
     """
+    E = data.edge_index.shape[1]
+    if E == 0:
+        # Single-atom or no-bond molecule: no edges to stack
+        return torch.zeros((0, 5), dtype=torch.float32)
+
     mol3d = Chem.RWMol(mol)
     try:
         Chem.SanitizeMol(mol3d)
@@ -186,10 +191,8 @@ def build_edge_features_geognn_for_atom_graph(data, mol):
         p = conf.GetAtomPosition(i)
         pos[i] = [p.x, p.y, p.z]
 
-    # Build edge features aligned with data.edge_index
-    E = data.edge_index.shape[1]
+    # Build edge features aligned with data.edge_index (E already set above)
     edge_feats = []
-
     for e in range(E):
         u = int(data.edge_index[0, e])
         v = int(data.edge_index[1, e])
@@ -603,13 +606,15 @@ def create_graph_list(dataset):
 
     g, node_tags = create_nodetags(mol)
 
+    # Avoid copy-from-tensor warning: node_features is already a tensor
+    nf = node_features.clone().detach().to(torch.float32)
     g_list.append(
         S2VGraph(
             g=g,
             label=data.y,
             mol=mol,
             node_tags=node_tags,
-            node_features=torch.tensor(node_features, dtype=torch.float32),
+            node_features=nf,
             edge_index=edge_index,
             edge_attr=edge_attr,
         )

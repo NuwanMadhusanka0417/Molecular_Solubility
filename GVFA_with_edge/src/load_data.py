@@ -1,6 +1,7 @@
 import pandas as pd, torch
 from torch_geometric.data import InMemoryDataset, Data
 from rdkit import Chem
+from sklearn.model_selection import train_test_split
 
 from rdkit import RDLogger
 RDLogger.DisableLog("rdApp.*")
@@ -40,8 +41,12 @@ def smiles_to_data(smi, yval):
 
 
 class ZINCLikeCSV(InMemoryDataset):
-    def __init__(self, csv_path, smiles_col="smiles_canon", target_col="LogS"):
-        df = pd.read_csv(csv_path)
+    """Load graph data from a CSV path or a pandas DataFrame."""
+    def __init__(self, csv_path_or_df, smiles_col="smiles_canon", target_col="LogS"):
+        if isinstance(csv_path_or_df, pd.DataFrame):
+            df = csv_path_or_df
+        else:
+            df = pd.read_csv(csv_path_or_df)
         super().__init__('.')
         graphs = []
         for smi, y in zip(df[smiles_col], df[target_col]):
@@ -51,7 +56,15 @@ class ZINCLikeCSV(InMemoryDataset):
         self.data, self.slices = self.collate(graphs)
 
 def load_data():
-  dataset_test  = ZINCLikeCSV("final_data/final_unique_test.csv")
-  dataset_train  = ZINCLikeCSV("final_data/final_unique_train_fixed.csv")
-
-  return dataset_train, dataset_test #, gl_train, 
+  """
+  Load solubility_1.csv: SMILES and logS. Split ~90% train / ~10% test.
+  Training: ~90% of compounds; Test: ~10% of compounds (fixed random_state for reproducibility).
+  """
+  df = pd.read_csv("final_data/solubility_1.csv")
+  df = df.dropna(subset=["SMILES", "logS"])
+  train_df, test_df = train_test_split(
+      df, test_size=0.1, random_state=42, shuffle=True
+  )
+  dataset_train = ZINCLikeCSV(train_df, smiles_col="SMILES", target_col="logS")
+  dataset_test  = ZINCLikeCSV(test_df,  smiles_col="SMILES", target_col="logS")
+  return dataset_train, dataset_test 
