@@ -16,7 +16,7 @@ def getEmbedding(model, device, train_graphs, batch_size=100, SUM=True, use_size
         hop_alpha<1 (e.g. 0.9) decays weight with hop distance.
     """
     model.to(device)
-    model.train()
+    model.eval()
 
     combined_embeddings = []
     all_labels = []

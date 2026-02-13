@@ -8,19 +8,12 @@ sys.path.append("models/")
 from models.mlp import MLP
 
 class GraphCNN(nn.Module):
-    def __init__(self, input_dim, num_layers, delta, graph_pooling_type, neighbor_pooling_type, device, equation, edge_feat_dim=5, edge_projection_type="orthogonal", use_resonator=False, resonator_iters=7, resonator_beta=0.75):
+    def __init__(self, input_dim, num_layers, delta, graph_pooling_type, neighbor_pooling_type, device, equation, edge_feat_dim=5, edge_projection_type="orthogonal", use_reservoir=False, reservoir_iters=7, reservoir_alpha=0.8, reservoir_polynomial_order=2, reservoir_history_weight=0.75, use_resonator=False, resonator_iters=7, resonator_beta=0.75):
         '''
-            num_layers: number of layers (INCLUDING input)
-            input_dim: node HV dim D
-            delta: binding usage
-            neighbor_pooling_type: sum, average, or max
-            graph_pooling_type: sum or average
-            device: device
-            edge_feat_dim: raw edge feature dim; 0 = no edge conditioning
-            edge_projection_type: "orthogonal" (info-preserving) or "gaussian" for edge_attr -> HV
-            use_resonator: if True, apply resonator consensus to refine final layer (denoise via neighbor agreement)
-            resonator_iters: iterations for resonator (5-10 typical)
-            resonator_beta: mixing factor 0.7-0.85 (higher = more stability)
+            use_reservoir: VSA Reservoir Computing (Gayler 2023) - polynomial feature construction
+            reservoir_iters: iterations (7 typical); reservoir_alpha: message strength
+            reservoir_polynomial_order: 1=linear, 2=quadratic; reservoir_history_weight: feature fading
+            use_resonator: legacy fallback (deprecated, use use_reservoir instead)
         '''
 
         super(GraphCNN, self).__init__()
@@ -33,6 +26,11 @@ class GraphCNN(nn.Module):
         self.delta = delta
         self.equation = equation
         self.edge_feat_dim = edge_feat_dim if edge_feat_dim else 0
+        self.use_reservoir = use_reservoir
+        self.reservoir_iters = reservoir_iters
+        self.reservoir_alpha = reservoir_alpha
+        self.reservoir_polynomial_order = reservoir_polynomial_order
+        self.reservoir_history_weight = reservoir_history_weight
         self.use_resonator = use_resonator
         self.resonator_iters = resonator_iters
         self.resonator_beta = resonator_beta
@@ -172,42 +170,62 @@ class GraphCNN(nn.Module):
         # Return the real part of the result as the final bound hypervectors
         return torch.real(result)
 
+    def permute_hv(self, x, shift=1):
+        """Cyclic permutation to encode structural/temporal relationships (P_bef in Gayler 2023)."""
+        return torch.roll(x, shifts=shift, dims=1)
+
+    def weighted_bundle(self, x, y, weight_x, weight_y, eps=1e-8):
+        """Weighted VSA bundling with L2 normalization for feature fading control."""
+        result = weight_x * x + weight_y * y
+        norm = result.norm(p=2, dim=1, keepdim=True).clamp(min=eps)
+        return result / norm
+
+    def reservoir_message_passing(self, node_H, edge_H, edge_index, eps=1e-8):
+        """VSA message passing: bind neighbor states with edge features, aggregate at dst."""
+        src, dst = edge_index[0], edge_index[1]
+        neighbor_h = node_H[src]
+        messages = self.bind(neighbor_h, edge_H)
+        aggregated = torch.zeros_like(node_H)
+        aggregated.index_add_(0, dst, self.reservoir_alpha * messages)
+        norm = aggregated.norm(p=2, dim=1, keepdim=True).clamp(min=eps)
+        return aggregated / norm
+
+    def reservoir_update(self, node_H, edge_H, edge_index):
+        """
+        VSA Reservoir Computing (Gayler 2023, Section 4.4).
+        x(n) = u(n) + u(n) × P_bef(x(n-1)) with polynomial feature construction.
+        """
+        x_state = node_H.clone()
+        for _ in range(self.reservoir_iters):
+            messages = self.reservoir_message_passing(x_state, edge_H, edge_index)
+            x_permuted = self.permute_hv(x_state, shift=1)
+            interaction = self.bind(messages, x_permuted)
+            if self.reservoir_polynomial_order >= 2:
+                w_msg = (1 - self.reservoir_history_weight) * 0.5
+                w_state = self.reservoir_history_weight * 0.5
+                w_interaction = 0.5
+                total = w_msg + w_state + w_interaction
+                x_state = (w_msg / total) * messages + (w_state / total) * x_permuted + (w_interaction / total) * interaction
+            else:
+                x_state = self.weighted_bundle(x_permuted, messages, self.reservoir_history_weight, 1 - self.reservoir_history_weight)
+            x_state = F.normalize(x_state, p=2, dim=1)
+        return x_state
+
     def resonator_consensus(self, node_H, edge_H, edge_index, iterations=7, beta=0.75):
-        """
-        Iterative resonator network to reach stable consensus states.
-        Denoises and stabilizes node representations through neighbor agreement.
-
-        node_H: [N, D] node hypervectors
-        edge_H: [E, D] edge hypervectors
-        edge_index: [2, E] (src, dst) - messages flow src -> dst
-        beta: mixing factor (0.7-0.85 recommended). Higher = more stability.
-        iterations: 5-10 typically sufficient.
-
-        Returns: [N, D] refined node features
-        """
+        """Legacy resonator (deprecated, use reservoir_update instead)."""
         N, D = node_H.shape
-        E = edge_index.shape[1]
-        device = node_H.device
-        dtype = node_H.dtype
-
         current = node_H.clone()
         src, dst = edge_index[0], edge_index[1]
-
         for _ in range(iterations):
             messages = torch.zeros_like(current)
-            neighbor_h = current[src]  # [E, D] - use current refined state
-            msg = self.bind(edge_H, neighbor_h)  # bind edge with sender state
+            neighbor_h = current[src]
+            msg = self.bind(edge_H, neighbor_h)
             messages.index_add_(0, dst, msg)
-
-            # Normalize incoming messages (avoid div by zero for isolated nodes)
             msg_norm = messages.norm(p=2, dim=1, keepdim=True).clamp(min=1e-8)
             messages = messages / msg_norm
-
-            # Resonator update: mix old state with neighbor consensus
             current = beta * current + (1 - beta) * messages
             curr_norm = current.norm(p=2, dim=1, keepdim=True).clamp(min=1e-8)
             current = current / curr_norm
-
         return current
     def invert_permutation(self, perm):
         """Generate the inverse of a permutation."""
@@ -298,13 +316,16 @@ class GraphCNN(nn.Module):
             )
             hidden_rep.append(h)
 
-        # Resonator consensus: refine final layer through neighbor agreement (denoise, stabilize)
-        if self.use_resonator and edge_index is not None and edge_H is not None:
-            hidden_rep[-1] = self.resonator_consensus(
-                hidden_rep[-1], edge_H, edge_index,
-                iterations=self.resonator_iters,
-                beta=self.resonator_beta,
-            )
+        # VSA Reservoir Computing or legacy resonator: refine final layer
+        if edge_index is not None and edge_H is not None:
+            if self.use_reservoir:
+                hidden_rep[-1] = self.reservoir_update(hidden_rep[-1], edge_H, edge_index)
+            elif self.use_resonator:
+                hidden_rep[-1] = self.resonator_consensus(
+                    hidden_rep[-1], edge_H, edge_index,
+                    iterations=self.resonator_iters,
+                    beta=self.resonator_beta,
+                )
 
         pooled_hS = []
         for layer, h in enumerate(hidden_rep):
