@@ -587,6 +587,9 @@ def pyg_graph_to_mol(data):
 def create_graph_list(dataset):
   g_list = []
   for data in dataset:
+    # Skip graphs with no edges (avoids "need at least one array to stack" in edge feature building)
+    if data.edge_index.shape[1] == 0:
+      continue
     mol = pyg_graph_to_mol(data)
 
     # node features (already include some edge-aggregated info)
@@ -603,13 +606,19 @@ def create_graph_list(dataset):
 
     g, node_tags = create_nodetags(mol)
 
+    # Avoid torch.tensor(tensor) copy warning: use clone().detach() when already a tensor
+    if isinstance(node_features, torch.Tensor):
+      node_features = node_features.clone().detach().to(torch.float32)
+    else:
+      node_features = torch.tensor(node_features, dtype=torch.float32)
+
     g_list.append(
         S2VGraph(
             g=g,
             label=data.y,
             mol=mol,
             node_tags=node_tags,
-            node_features=torch.tensor(node_features, dtype=torch.float32),
+            node_features=node_features,
             edge_index=edge_index,
             edge_attr=edge_attr,
         )

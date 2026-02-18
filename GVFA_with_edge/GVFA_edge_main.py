@@ -97,11 +97,12 @@ for dim in dims:
 
     # ---------- Evaluate ----------
     pred = xgb.predict(test_embeddings_eq1)
-    rmse = mean_squared_error(test_labels_eq1, pred)
+    mse = mean_squared_error(test_labels_eq1, pred)
     mae  = mean_absolute_error(test_labels_eq1, pred)
     r2   = r2_score(test_labels_eq1, pred)
+    rmse = np.sqrt(mse)
 
-    print(f"Dimention,{dim},MAE,{mae},RMSE,{rmse},R2,{r2}")
+    print(f"Dimention,{dim},MAE,{mae},MSE,{mse},RMSE,{rmse},R2,{r2}")
 
     del xgb
     del train_embeddings_eq1

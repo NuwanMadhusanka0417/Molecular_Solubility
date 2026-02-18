@@ -16,6 +16,9 @@ def smiles_to_data(smi, yval):
     mol = Chem.MolFromSmiles(smi)
     if mol is None or mol.GetNumAtoms() == 0:
         return None
+    # Skip molecules with no bonds (single-atom or invalid); they break edge feature building.
+    if mol.GetNumBonds() == 0:
+        return None
 
     # x: [num_nodes, 1] (long) — single integer per atom (e.g., atomic number)
     x = torch.tensor([[a.GetAtomicNum()] for a in mol.GetAtoms()], dtype=torch.long)
@@ -40,8 +43,14 @@ def smiles_to_data(smi, yval):
 
 
 class ZINCLikeCSV(InMemoryDataset):
-    def __init__(self, csv_path, smiles_col="smiles_canon", target_col="LogS"):
-        df = pd.read_csv(csv_path)
+    def __init__(self, csv_path=None, smiles_col="smiles_canon", target_col="LogS", df=None):
+        """
+        If df is provided, use it directly; otherwise load from csv_path.
+        """
+        if df is None and csv_path is None:
+            raise ValueError("Either csv_path or df must be provided.")
+        if df is None:
+            df = pd.read_csv(csv_path)
         super().__init__('.')
         graphs = []
         for smi, y in zip(df[smiles_col], df[target_col]):
@@ -50,8 +59,22 @@ class ZINCLikeCSV(InMemoryDataset):
                 graphs.append(g)
         self.data, self.slices = self.collate(graphs)
 
-def load_data():
-  dataset_test  = ZINCLikeCSV("final_data/final_unique_test.csv")
-  dataset_train  = ZINCLikeCSV("final_data/final_unique_train_fixed.csv")
+def load_data(csv_path="final_data/solubility_1.csv", smiles_col="SMILES", target_col="logS", train_frac=0.9, random_state=42):
+    """
+    Load data from a single CSV (e.g., solubility_1.csv), shuffle it, and split
+    into train and test according to train_frac (default 0.9 / 0.1).
+    """
+    df = pd.read_csv(csv_path)
+    # Shuffle before splitting to avoid order bias
+    df = df.sample(frac=1.0, random_state=random_state).reset_index(drop=True)
 
-  return dataset_train, dataset_test #, gl_train, 
+    n_total = len(df)
+    n_train = int(train_frac * n_total)
+
+    df_train = df.iloc[:n_train].reset_index(drop=True)
+    df_test = df.iloc[n_train:].reset_index(drop=True)
+
+    dataset_train = ZINCLikeCSV(df=df_train, smiles_col=smiles_col, target_col=target_col)
+    dataset_test = ZINCLikeCSV(df=df_test, smiles_col=smiles_col, target_col=target_col)
+
+    return dataset_train, dataset_test  #, gl_train, 
