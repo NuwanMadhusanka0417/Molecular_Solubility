@@ -8,7 +8,7 @@ sys.path.append("models/")
 from models.mlp import MLP
 
 class GraphCNN(nn.Module):
-    def __init__(self, input_dim, num_layers, delta, graph_pooling_type, neighbor_pooling_type, device, equation, edge_feat_dim=5, edge_projection_type="orthogonal", use_reservoir=False, reservoir_iters=7, reservoir_alpha=0.8, reservoir_polynomial_order=2, reservoir_history_weight=0.75, use_resonator=False, resonator_iters=7, resonator_beta=0.75, hop_decay=0.85, sigma_pi_orders=None):
+    def __init__(self, input_dim, num_layers, delta, graph_pooling_type, neighbor_pooling_type, device, equation, edge_feat_dim=5, edge_projection_type="orthogonal", use_reservoir=False, reservoir_iters=7, reservoir_alpha=0.8, reservoir_polynomial_order=2, reservoir_history_weight=0.75, use_resonator=False, resonator_iters=7, resonator_beta=0.75, hop_decay=0.85, sigma_pi_orders=None, permute_in_gvfa=False):
         '''
             use_reservoir: VSA-RC (VSA Reservoir Computing): tap buffer + Sigma-Pi polynomial expansion
             reservoir_iters, reservoir_alpha, reservoir_history_weight: unused (kept for compat)
@@ -16,6 +16,8 @@ class GraphCNN(nn.Module):
             hop_decay: lambda in [0.6, 0.95], decay for far-hop mixing in tap buffer
             sigma_pi_orders: list of orders T, e.g. [0,1] for 1st+2nd order (recommended)
             use_resonator: legacy fallback (deprecated)
+            permute_in_gvfa: if True, apply hop/layer permutation inside GVFA (next_layer_eps).
+                             Set False for reservoir: hop tagging is applied only in tap_buffer to avoid double-tagging and improve regression accuracy.
         '''
 
         super(GraphCNN, self).__init__()
@@ -38,6 +40,9 @@ class GraphCNN(nn.Module):
         self.resonator_beta = resonator_beta
         self.hop_decay = hop_decay if use_reservoir else 1.0
         self.sigma_pi_orders = sigma_pi_orders if sigma_pi_orders is not None else [0, 1]
+        self.permute_in_gvfa = permute_in_gvfa
+        if use_reservoir:
+            self.permute_in_gvfa = False  # Reservoir: hop permutation only in tap buffer, not inside GVFA
 
         if self.edge_feat_dim > 0:
             g = torch.Generator().manual_seed(0)
@@ -205,9 +210,13 @@ class GraphCNN(nn.Module):
 
     def tap_buffer(self, hidden_rep, eps=1e-8):
         """
-        RC-style tap buffer per node: F_v^(1) = sum_k lambda^k * rho^k(h_v^(k)).
-        hidden_rep: list of [N, D] tensors, one per hop k=0..K.
+        RC-style tap buffer per node: F1 = sum_k (hop_decay^k) * rho_k(h_k).
+        Hop-specific permutation (rho_k) is applied HERE only, outside GVFA.
+        This avoids double hop-tagging (inside GVFA + tap buffer), reducing over-randomization
+        and improving ridge readout stability / regression accuracy.
+        hidden_rep: list of [N, D] tensors, one per hop k=0..K (from GVFA without internal permutation).
         """
+        # Permutation in tap buffer: ON (sole place for hop tagging when permute_in_gvfa is False)
         F1 = torch.zeros_like(hidden_rep[0], device=hidden_rep[0].device, dtype=hidden_rep[0].dtype)
         for k, h_k in enumerate(hidden_rep):
             weight = self.hop_decay ** k
@@ -217,8 +226,8 @@ class GraphCNN(nn.Module):
 
     def sigma_pi_expansion(self, F1, eps=1e-8):
         """
-        Sigma-Pi polynomial expansion: F_v = sum_{t in T} *_t(F_v^(1)).
-        *_0(F)=F, *_t(F)= pi(*_{t-1}(F)) circ F (VSA binding).
+        Sigma-Pi polynomial expansion after tap buffer: F_v = sum_{t in T} *_t(F1).
+        ast0 = F1; ast1 = bind(pi(ast0), F1); ... Bundle orders in T and normalize.
         """
         D = F1.shape[1]
         result = torch.zeros_like(F1)
@@ -324,11 +333,15 @@ class GraphCNN(nn.Module):
 
     def next_layer_eps(self, h, layer, padded_neighbor_list=None, Adj_block=None, delta=1, equation=10,
                        edge_index=None, edge_H=None, num_nodes=None):
+        # Hop/layer permutation inside GVFA: only if permute_in_gvfa is True (OFF for reservoir to avoid double-tagging).
         shift = 1
         torch.manual_seed(0)
 
         if equation == 10:
-            rotated = torch.roll(h.clone(), shifts=shift, dims=1)
+            if self.permute_in_gvfa:
+                rotated = torch.roll(h.clone(), shifts=shift, dims=1)
+            else:
+                rotated = h.clone()
             pooled = self._pool_neighbors(rotated, Adj_block, padded_neighbor_list, edge_index, edge_H, num_nodes)
             if delta == 1:
                 pooled = self.bind(h, pooled) + h
@@ -345,10 +358,14 @@ class GraphCNN(nn.Module):
                 pooled = self.bind(h, pooled) + h + pooled
             else:
                 pooled = pooled + h
-            pooled = torch.roll(pooled, shifts=shift, dims=1)
+            if self.permute_in_gvfa:
+                pooled = torch.roll(pooled, shifts=shift, dims=1)
 
         else:
-            rotated = torch.roll(h.clone(), shifts=shift, dims=1)
+            if self.permute_in_gvfa:
+                rotated = torch.roll(h.clone(), shifts=shift, dims=1)
+            else:
+                rotated = h.clone()
             pooled = self._pool_neighbors(rotated, Adj_block, padded_neighbor_list, edge_index, edge_H, num_nodes)
             if delta == 1:
                 pooled = self.bind(h, pooled) + h
@@ -356,7 +373,8 @@ class GraphCNN(nn.Module):
                 pooled = self.bind(h, pooled) + h + pooled
             else:
                 pooled = pooled + h
-            pooled = torch.roll(pooled, shifts=shift, dims=1)
+            if self.permute_in_gvfa:
+                pooled = torch.roll(pooled, shifts=shift, dims=1)
 
         pooled = torch.sign(pooled)
         return pooled
@@ -392,6 +410,8 @@ class GraphCNN(nn.Module):
             hidden_rep.append(h)
 
         # VSA-RC: tap buffer + Sigma-Pi + multi-stat pooling (correct method)
+        # Accuracy: Hop permutation only in tap buffer (not inside GVFA) avoids double hop-tagging,
+        # reducing over-randomization/noise and making hop-as-taps representation cleaner for ridge readout stability.
         if self.use_reservoir:
             start_idx = [0]
             for g in batch_graph:
@@ -399,6 +419,12 @@ class GraphCNN(nn.Module):
             F1 = self.tap_buffer(hidden_rep)
             F_v = self.sigma_pi_expansion(F1)
             g = self.multi_stat_pool(F_v, graph_pool, start_idx)
+            # Ablation-friendly log (shapes; uncomment to print every forward)
+            if not getattr(self, "_reservoir_ablation_logged", False):
+                self._reservoir_ablation_logged = True
+                print("[GVFA-Reservoir] Permutation inside GVFA: OFF  |  Permutation in tap buffer: ON")
+                print("[GVFA-Reservoir] Shapes: hk={}, F1={}, F_v={}, pooled g={}".format(
+                    [hr.shape for hr in hidden_rep], F1.shape, F_v.shape, g.shape))
             return g.unsqueeze(0)
         # Legacy resonator: refine final layer only
         if edge_index is not None and edge_H is not None and self.use_resonator:
