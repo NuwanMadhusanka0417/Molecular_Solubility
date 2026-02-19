@@ -55,16 +55,52 @@ class ZINCLikeCSV(InMemoryDataset):
                 graphs.append(g)
         self.data, self.slices = self.collate(graphs)
 
-def load_data():
+def load_data(dataset="old", train_path=None, test_path=None, smiles_col=None, target_col=None):
   """
-  Load solubility_1.csv: SMILES and logS. Split ~90% train / ~10% test.
-  Training: ~90% of compounds; Test: ~10% of compounds (fixed random_state for reproducibility).
+  Load train/test data with a choice of dataset source.
+
+  Parameters
+  ----------
+  dataset : str
+      "old"  : use solubility_1.csv, columns "SMILES" / "logS", 90/10 train/test split.
+      "new"  : use separate train/test CSVs (or one CSV with split); paths/columns configurable.
+  train_path : str, optional
+      For dataset="new": path to training CSV. Default: "final_data/final_unique_train.csv".
+  test_path : str, optional
+      For dataset="new": path to test CSV. Default: "final_data/final_unique_test.csv".
+  smiles_col : str, optional
+      For dataset="new": column name for SMILES. Default: "smiles_canon".
+  target_col : str, optional
+      For dataset="new": column name for target. Default: "LogS".
+
+  Returns
+  -------
+  dataset_train, dataset_test
+      PyG InMemoryDataset (ZINCLikeCSV) so create_graph_list() works unchanged.
   """
-  df = pd.read_csv("final_data/solubility_1.csv")
-  df = df.dropna(subset=["SMILES", "logS"])
-  train_df, test_df = train_test_split(
-      df, test_size=0.1, random_state=42, shuffle=True
-  )
-  dataset_train = ZINCLikeCSV(train_df, smiles_col="SMILES", target_col="logS")
-  dataset_test  = ZINCLikeCSV(test_df,  smiles_col="SMILES", target_col="logS")
-  return dataset_train, dataset_test 
+  if dataset == "old":
+    df = pd.read_csv("final_data/solubility_1.csv")
+    df = df.dropna(subset=["SMILES", "logS"])
+    train_df, test_df = train_test_split(
+        df, test_size=0.1, random_state=42, shuffle=True
+    )
+    dataset_train = ZINCLikeCSV(train_df, smiles_col="SMILES", target_col="logS")
+    dataset_test  = ZINCLikeCSV(test_df,  smiles_col="SMILES", target_col="logS")
+    return dataset_train, dataset_test
+
+  if dataset == "new":
+    train_path = train_path or "final_data/final_unique_train.csv"
+    test_path  = test_path  or "final_data/final_unique_test.csv"
+    smiles_col = smiles_col or "smiles_canon"
+    target_col = target_col or "LogS"
+
+    train_df = pd.read_csv(train_path)
+    train_df = train_df.dropna(subset=[smiles_col, target_col])
+    test_df  = pd.read_csv(test_path)
+    test_df  = test_df.dropna(subset=[smiles_col, target_col])
+
+    dataset_train = ZINCLikeCSV(train_df, smiles_col=smiles_col, target_col=target_col)
+    dataset_test  = ZINCLikeCSV(test_df,  smiles_col=smiles_col, target_col=target_col)
+    return dataset_train, dataset_test
+
+  raise ValueError('dataset must be "old" or "new"')

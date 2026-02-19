@@ -8,12 +8,14 @@ sys.path.append("models/")
 from models.mlp import MLP
 
 class GraphCNN(nn.Module):
-    def __init__(self, input_dim, num_layers, delta, graph_pooling_type, neighbor_pooling_type, device, equation, edge_feat_dim=5, edge_projection_type="orthogonal", use_reservoir=False, reservoir_iters=7, reservoir_alpha=0.8, reservoir_polynomial_order=2, reservoir_history_weight=0.75, use_resonator=False, resonator_iters=7, resonator_beta=0.75):
+    def __init__(self, input_dim, num_layers, delta, graph_pooling_type, neighbor_pooling_type, device, equation, edge_feat_dim=5, edge_projection_type="orthogonal", use_reservoir=False, reservoir_iters=7, reservoir_alpha=0.8, reservoir_polynomial_order=2, reservoir_history_weight=0.75, use_resonator=False, resonator_iters=7, resonator_beta=0.75, hop_decay=0.85, sigma_pi_orders=None):
         '''
-            use_reservoir: VSA Reservoir Computing (Gayler 2023) - polynomial feature construction
-            reservoir_iters: iterations (7 typical); reservoir_alpha: message strength
-            reservoir_polynomial_order: 1=linear, 2=quadratic; reservoir_history_weight: feature fading
-            use_resonator: legacy fallback (deprecated, use use_reservoir instead)
+            use_reservoir: VSA-RC (VSA Reservoir Computing): tap buffer + Sigma-Pi polynomial expansion
+            reservoir_iters, reservoir_alpha, reservoir_history_weight: unused (kept for compat)
+            reservoir_polynomial_order: unused, use sigma_pi_orders instead
+            hop_decay: lambda in [0.6, 0.95], decay for far-hop mixing in tap buffer
+            sigma_pi_orders: list of orders T, e.g. [0,1] for 1st+2nd order (recommended)
+            use_resonator: legacy fallback (deprecated)
         '''
 
         super(GraphCNN, self).__init__()
@@ -34,6 +36,8 @@ class GraphCNN(nn.Module):
         self.use_resonator = use_resonator
         self.resonator_iters = resonator_iters
         self.resonator_beta = resonator_beta
+        self.hop_decay = hop_decay if use_reservoir else 1.0
+        self.sigma_pi_orders = sigma_pi_orders if sigma_pi_orders is not None else [0, 1]
 
         if self.edge_feat_dim > 0:
             g = torch.Generator().manual_seed(0)
@@ -190,10 +194,81 @@ class GraphCNN(nn.Module):
         norm = aggregated.norm(p=2, dim=1, keepdim=True).clamp(min=eps)
         return aggregated / norm
 
+    def _rho_k(self, x, k):
+        """Hop-specific permutation (rho^k): cyclic roll by k positions."""
+        return torch.roll(x, shifts=int(k), dims=1)
+
+    def _pi(self, x, shift=None):
+        """Sigma-Pi permutation (different from rho): used for polynomial recursion."""
+        s = shift if shift is not None else max(1, x.shape[1] // 3)
+        return torch.roll(x, shifts=int(s), dims=1)
+
+    def tap_buffer(self, hidden_rep, eps=1e-8):
+        """
+        RC-style tap buffer per node: F_v^(1) = sum_k lambda^k * rho^k(h_v^(k)).
+        hidden_rep: list of [N, D] tensors, one per hop k=0..K.
+        """
+        F1 = torch.zeros_like(hidden_rep[0], device=hidden_rep[0].device, dtype=hidden_rep[0].dtype)
+        for k, h_k in enumerate(hidden_rep):
+            weight = self.hop_decay ** k
+            permuted = self._rho_k(h_k, k)
+            F1 = F1 + weight * permuted
+        return F.normalize(F1, p=2, dim=1, eps=eps)
+
+    def sigma_pi_expansion(self, F1, eps=1e-8):
+        """
+        Sigma-Pi polynomial expansion: F_v = sum_{t in T} *_t(F_v^(1)).
+        *_0(F)=F, *_t(F)= pi(*_{t-1}(F)) circ F (VSA binding).
+        """
+        D = F1.shape[1]
+        result = torch.zeros_like(F1)
+        ast_prev = F1
+        for t in sorted(self.sigma_pi_orders):
+            if t == 0:
+                ast_t = F1
+            else:
+                ast_t = self.bind(self._pi(ast_prev, shift=max(1, D // 3)), F1)
+                ast_t = F.normalize(ast_t, p=2, dim=1, eps=eps)
+            ast_prev = ast_t
+            result = result + ast_t
+        return F.normalize(result, p=2, dim=1, eps=eps)
+
+    def multi_stat_pool(self, F_v, graph_pool, start_idx, eps=1e-8):
+        """
+        Multi-stat pooling: g = [mean_v(F_v) | max_v(F_v) | mean_v(F_v circ F_v)].
+        graph_pool: [num_graphs, total_nodes] sparse; start_idx from preprocess.
+        Returns [num_graphs, 3*D] (concatenation).
+        """
+        num_graphs = graph_pool.shape[0]
+        D = F_v.shape[1]
+        g_mean = torch.spmm(graph_pool, F_v)
+        g_max = self._segment_max(F_v, graph_pool, start_idx, num_graphs)
+        F_sq = self.bind(F_v, F_v)
+        g_mean_sq = torch.spmm(graph_pool, F_sq)
+        num_nodes = torch.tensor(
+            [start_idx[i + 1] - start_idx[i] for i in range(num_graphs)],
+            dtype=F_v.dtype, device=F_v.device
+        ).view(-1, 1).clamp(min=1)
+        if self.graph_pooling_type == "sum":
+            g_mean = g_mean / num_nodes
+            g_mean_sq = g_mean_sq / num_nodes
+        g = torch.cat([g_mean, g_max, g_mean_sq], dim=1)
+        return g
+
+    def _segment_max(self, x, graph_pool, start_idx, num_graphs):
+        """Compute max over nodes per graph. x: [total_nodes, D]."""
+        total_nodes = x.shape[0]
+        D = x.shape[1]
+        out = torch.full((num_graphs, D), float('-inf'), device=x.device, dtype=x.dtype)
+        for i in range(num_graphs):
+            lo, hi = start_idx[i], start_idx[i + 1]
+            if hi > lo:
+                out[i] = x[lo:hi].max(dim=0)[0]
+        return out
+
     def reservoir_update(self, node_H, edge_H, edge_index):
         """
-        VSA Reservoir Computing (Gayler 2023, Section 4.4).
-        x(n) = u(n) + u(n) × P_bef(x(n-1)) with polynomial feature construction.
+        Legacy: old reservoir-style update (deprecated). Use tap_buffer + sigma_pi_expansion instead.
         """
         x_state = node_H.clone()
         for _ in range(self.reservoir_iters):
@@ -316,16 +391,22 @@ class GraphCNN(nn.Module):
             )
             hidden_rep.append(h)
 
-        # VSA Reservoir Computing or legacy resonator: refine final layer
-        if edge_index is not None and edge_H is not None:
-            if self.use_reservoir:
-                hidden_rep[-1] = self.reservoir_update(hidden_rep[-1], edge_H, edge_index)
-            elif self.use_resonator:
-                hidden_rep[-1] = self.resonator_consensus(
-                    hidden_rep[-1], edge_H, edge_index,
-                    iterations=self.resonator_iters,
-                    beta=self.resonator_beta,
-                )
+        # VSA-RC: tap buffer + Sigma-Pi + multi-stat pooling (correct method)
+        if self.use_reservoir:
+            start_idx = [0]
+            for g in batch_graph:
+                start_idx.append(start_idx[-1] + len(g.g))
+            F1 = self.tap_buffer(hidden_rep)
+            F_v = self.sigma_pi_expansion(F1)
+            g = self.multi_stat_pool(F_v, graph_pool, start_idx)
+            return g.unsqueeze(0)
+        # Legacy resonator: refine final layer only
+        if edge_index is not None and edge_H is not None and self.use_resonator:
+            hidden_rep[-1] = self.resonator_consensus(
+                hidden_rep[-1], edge_H, edge_index,
+                iterations=self.resonator_iters,
+                beta=self.resonator_beta,
+            )
 
         pooled_hS = []
         for layer, h in enumerate(hidden_rep):

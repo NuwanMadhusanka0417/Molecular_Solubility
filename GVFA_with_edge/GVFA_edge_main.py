@@ -12,12 +12,17 @@ from src.VSA_conversion import VSA_conversion
 from src.embeddings import getEmbedding
 from models.graphcnnVSA_Binding_FULL import GraphCNN
 import torch
-from xgboost import XGBRegressor
 import numpy as np
+from sklearn.linear_model import Ridge, RidgeCV
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
+# ----- Dataset choice -----
+# "old": final_data/solubility_1.csv (SMILES, logS), 90/10 train/test split
+# "new": final_data/final_unique_train.csv + final_unique_test.csv (smiles_canon, LogS)
+#        Override paths/columns via load_data(train_path=..., test_path=..., smiles_col=..., target_col=...)
+DATASET = "old"
 
-train_data, test_data = load_data()
+train_data, test_data = load_data(dataset=DATASET)
 
 # print(train_data[0].)
 
@@ -29,14 +34,12 @@ test_graphs = create_graph_list(test_data)
 num_layers = 5
 delta_eq1 = 1
 equation_eq1 = 10
-graph_pooling_type = 'sum'  # sum, average
-neighbor_pooling_type = 'sum' # sum, average, max
-hop_alpha = 0.8  # Topologically decaying hop weights: weights = alpha ** layer_ids (1.0 = no decay)
-use_reservoir = True   # VSA Reservoir Computing (Gayler 2023): polynomial feature construction
-reservoir_iters = 7
-reservoir_alpha = 0.8
-reservoir_polynomial_order = 2
-reservoir_history_weight = 0.75
+graph_pooling_type = 'sum'
+neighbor_pooling_type = 'sum'
+use_reservoir = True   # VSA-RC: tap buffer + Sigma-Pi polynomial expansion
+hop_decay = 0.85      # lambda in [0.6, 0.95] for tap buffer (far-hop decay)
+sigma_pi_orders = [0, 1,2]  # T={0,1}: 1st + 2nd order (sweet spot); {0,1,2} for 3rd order
+use_ridge = True      # Ridge regression (RC standard); False = XGBoost
 device = 1  # help='if delta is 1 will be the model with binding, if 0 model will have be without binding (default: 1)'
 device = torch.device('cpu')
 
@@ -58,18 +61,15 @@ for dim in dims:
         edge_feat_dim=5,
         edge_projection_type="orthogonal",
         use_reservoir=use_reservoir,
-        reservoir_iters=reservoir_iters,
-        reservoir_alpha=reservoir_alpha,
-        reservoir_polynomial_order=reservoir_polynomial_order,
-        reservoir_history_weight=reservoir_history_weight,
+        hop_decay=hop_decay,
+        sigma_pi_orders=sigma_pi_orders,
     )
-    # use_size_aware=True: scale by 1/√(num_nodes) per layer + append num_nodes as extra feature (D+1 for XGBoost)
-    # hop_alpha: topologically decaying hop weights (1.0 = all layers equal)
+    # use_size_aware: scale by 1/√(num_nodes) + append num_nodes; hop_alpha=1 when use_reservoir (single vector)
     train_embeddings_eq1, train_labels_eq1 = getEmbedding(
-        model_eq1, device, train_HVs, use_size_aware=True, hop_alpha=hop_alpha
+        model_eq1, device, train_HVs, use_size_aware=True, hop_alpha=1.0
     )
     test_embeddings_eq1, test_labels_eq1 = getEmbedding(
-        model_eq1, device, test_HVs, use_size_aware=True, hop_alpha=hop_alpha
+        model_eq1, device, test_HVs, use_size_aware=True, hop_alpha=1.0
     )
 
     train_embeddings_eq1 = train_embeddings_eq1.squeeze(0)  # [N_train, D] or [N_train, D+1]
@@ -79,35 +79,40 @@ for dim in dims:
     # print(test_graphs[0].node_features)
     # print(train_embeddings_eq1.shape, train_labels_eq1.shape)
 
-    xgb = XGBRegressor(
-        n_estimators=2000,
-        learning_rate=0.03,
-        max_depth=7,
-        subsample=0.8,
-        colsample_bytree=0.8,
-        reg_lambda=1.0,
-        reg_alpha=0.0,
-        random_state=42,
-        n_jobs=4,
-        tree_method="hist"   # fast on CPU; use "gpu_hist" if you have GPU
-    )
-
-    xgb.fit(
-        train_embeddings_eq1, train_labels_eq1,
-        eval_set=[(test_embeddings_eq1, test_labels_eq1)],
-        # early_stopping_rounds=100,
-        verbose=False
-    )
+    if use_ridge:
+        # Ridge regression (RC standard): w = (G'G + alpha*I)^{-1} G' y
+        reg = RidgeCV(alphas=np.logspace(-4, 2, 50), cv=5, scoring='neg_mean_squared_error')
+        reg.fit(train_embeddings_eq1, train_labels_eq1)
+        pred = reg.predict(test_embeddings_eq1)
+    else:
+        from xgboost import XGBRegressor
+        reg = XGBRegressor(
+            n_estimators=2000,
+            learning_rate=0.03,
+            max_depth=7,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            reg_lambda=1.0,
+            reg_alpha=0.0,
+            random_state=42,
+            n_jobs=4,
+            tree_method="hist"
+        )
+        reg.fit(
+            train_embeddings_eq1, train_labels_eq1,
+            eval_set=[(test_embeddings_eq1, test_labels_eq1)],
+            verbose=False
+        )
+        pred = reg.predict(test_embeddings_eq1)
 
     # ---------- Evaluate ----------
-    pred = xgb.predict(test_embeddings_eq1)
     rmse = mean_squared_error(test_labels_eq1, pred)
     mae  = mean_absolute_error(test_labels_eq1, pred)
     r2   = r2_score(test_labels_eq1, pred)
 
     print(f"Dimention,{dim},MAE,{mae},RMSE,{rmse},R2,{r2}")
 
-    del xgb
+    del reg
     del train_embeddings_eq1
     del test_embeddings_eq1
     del test_labels_eq1
