@@ -364,12 +364,22 @@ class GraphCNN(nn.Module):
 
 
 
-    def forward(self, batch_graph, return_embedding=False):
+    def forward(self, batch_graph, return_embedding=False, return_node_rep=False):
+        """
+        return_node_rep: if True, return (H, batch) with H [N, D] node hypervectors and batch [N]
+                         for use with attention readout. Only one of graph-level or node-level is returned.
+        """
+        start_idx = [0]
+        for g in batch_graph:
+            start_idx.append(start_idx[-1] + len(g.g))
+        B = len(batch_graph)
+        N = start_idx[-1]
+
         X_concat = torch.cat([g.node_features for g in batch_graph], 0).to(self.device)
         graph_pool = self.__preprocess_graphpool(batch_graph)
         Adj_block = self.__preprocess_neighbors_sumavepool(batch_graph)
 
-        batched_ei, batched_ea, start_idx = self.__preprocess_edges(batch_graph)
+        batched_ei, batched_ea, _ = self.__preprocess_edges(batch_graph)
         num_nodes = start_idx[-1]
         edge_index = None
         edge_H = None
@@ -391,13 +401,15 @@ class GraphCNN(nn.Module):
             )
             hidden_rep.append(h)
 
-        # VSA-RC: tap buffer + Sigma-Pi + multi-stat pooling (correct method)
+        # VSA-RC: tap buffer + Sigma-Pi; then either node-level (H, batch) or graph-level g
         if self.use_reservoir:
-            start_idx = [0]
-            for g in batch_graph:
-                start_idx.append(start_idx[-1] + len(g.g))
             F1 = self.tap_buffer(hidden_rep)
             F_v = self.sigma_pi_expansion(F1)
+            if return_node_rep:
+                batch = torch.zeros(N, dtype=torch.long, device=F_v.device)
+                for b in range(B):
+                    batch[start_idx[b] : start_idx[b + 1]] = b
+                return (F_v, batch)
             g = self.multi_stat_pool(F_v, graph_pool, start_idx)
             return g.unsqueeze(0)
         # Legacy resonator: refine final layer only
@@ -407,6 +419,13 @@ class GraphCNN(nn.Module):
                 iterations=self.resonator_iters,
                 beta=self.resonator_beta,
             )
+
+        if return_node_rep:
+            H = hidden_rep[-1]
+            batch = torch.zeros(N, dtype=torch.long, device=H.device)
+            for b in range(B):
+                batch[start_idx[b] : start_idx[b + 1]] = b
+            return (H, batch)
 
         pooled_hS = []
         for layer, h in enumerate(hidden_rep):
