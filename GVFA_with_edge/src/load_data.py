@@ -63,11 +63,12 @@ def load_data(dataset="old", train_path=None, test_path=None, smiles_col=None, t
   ----------
   dataset : str
       "old"  : use solubility_1.csv, columns "SMILES" / "logS", 90/10 train/test split.
+      "solubility_novel" : train on solubility_1.csv, test on testset_novel.csv (SMILES/logS).
       "new"  : use separate train/test CSVs (or one CSV with split); paths/columns configurable.
   train_path : str, optional
-      For dataset="new": path to training CSV. Default: "final_data/final_unique_train.csv".
+      Override path to training CSV (for "solubility_novel" or "new").
   test_path : str, optional
-      For dataset="new": path to test CSV. Default: "final_data/final_unique_test.csv".
+      Override path to test CSV (for "solubility_novel" or "new").
   smiles_col : str, optional
       For dataset="new": column name for SMILES. Default: "smiles_canon".
   target_col : str, optional
@@ -88,6 +89,17 @@ def load_data(dataset="old", train_path=None, test_path=None, smiles_col=None, t
     dataset_test  = ZINCLikeCSV(test_df,  smiles_col="SMILES", target_col="logS")
     return dataset_train, dataset_test
 
+  if dataset == "solubility_novel":
+    train_path = train_path or "final_data/solubility_1.csv"
+    test_path  = test_path  or "final_data/testset_novel.csv"
+    train_df = pd.read_csv(train_path)
+    train_df = train_df.dropna(subset=["SMILES", "logS"])
+    test_df  = pd.read_csv(test_path)
+    test_df  = test_df.dropna(subset=["SMILES", "logS"])
+    dataset_train = ZINCLikeCSV(train_df, smiles_col="SMILES", target_col="logS")
+    dataset_test  = ZINCLikeCSV(test_df,  smiles_col="SMILES", target_col="logS")
+    return dataset_train, dataset_test
+
   if dataset == "new":
     train_path = train_path or "final_data/final_unique_train.csv"
     test_path  = test_path  or "final_data/final_unique_test.csv"
@@ -103,4 +115,4 @@ def load_data(dataset="old", train_path=None, test_path=None, smiles_col=None, t
     dataset_test  = ZINCLikeCSV(test_df,  smiles_col=smiles_col, target_col=target_col)
     return dataset_train, dataset_test
 
-  raise ValueError('dataset must be "old" or "new"')
+  raise ValueError('dataset must be "old", "solubility_novel", or "new"')

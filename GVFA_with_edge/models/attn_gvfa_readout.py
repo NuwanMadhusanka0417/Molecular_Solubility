@@ -93,18 +93,32 @@ class AttnReadoutPool(nn.Module):
 
 
 class RegressorHead(nn.Module):
-    """MLP: Linear(D -> hidden) + ReLU + Dropout + Linear(hidden -> 1)."""
-    def __init__(self, D, hidden_dim=64, dropout=0.2):
+    """MLP regressor. Supports 1-layer (legacy) or deeper architecture via hidden_dims list."""
+    def __init__(self, D, hidden_dim=64, dropout=0.2, hidden_dims=None):
         super().__init__()
-        self.fc1 = nn.Linear(D, hidden_dim)
-        self.dropout = nn.Dropout(dropout)
-        self.fc2 = nn.Linear(hidden_dim, 1)
+        if hidden_dims is None:
+            hidden_dims = [hidden_dim]
+        layers = []
+        in_d = D
+        for hd in hidden_dims:
+            layers.append(nn.Linear(in_d, hd))
+            layers.append(nn.BatchNorm1d(hd))
+            layers.append(nn.ReLU())
+            layers.append(nn.Dropout(dropout))
+            in_d = hd
+        layers.append(nn.Linear(in_d, 1))
+        self.net = nn.Sequential(*layers)
+        self._init_weights()
+
+    def _init_weights(self):
+        for m in self.net:
+            if isinstance(m, nn.Linear):
+                nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
 
     def forward(self, g):
-        # g [B, D]
-        h = F.relu(self.fc1(g))
-        h = self.dropout(h)
-        return self.fc2(h)
+        return self.net(g)
 
 
 class AttnGVFARegressor(nn.Module):
@@ -113,7 +127,7 @@ class AttnGVFARegressor(nn.Module):
     Only readout + MLP parameters are trained.
     """
     def __init__(self, gvfa_encoder, D, readout_hidden=None, regressor_hidden=64, dropout=0.2,
-                 use_layernorm=False, num_heads=1):
+                 use_layernorm=False, num_heads=1, regressor_hidden_dims=None):
         super().__init__()
         self.encoder = gvfa_encoder
         for p in self.encoder.parameters():
@@ -122,7 +136,8 @@ class AttnGVFARegressor(nn.Module):
             buf.requires_grad = False
 
         self.attn_pool = AttnReadoutPool(D, hidden_dim=readout_hidden, use_layernorm=use_layernorm, num_heads=num_heads)
-        self.regressor = RegressorHead(D, hidden_dim=regressor_hidden, dropout=dropout)
+        self.regressor = RegressorHead(D, hidden_dim=regressor_hidden, dropout=dropout,
+                                       hidden_dims=regressor_hidden_dims)
 
     def forward(self, batch_graph, return_embedding=False):
         """
@@ -142,7 +157,7 @@ class AttnGVFARegressor(nn.Module):
 
 
 def build_attn_gvfa_regressor(encoder, D, readout_hidden=None, regressor_hidden=64, dropout=0.2,
-                              use_layernorm=True, num_heads=1):
+                              use_layernorm=True, num_heads=1, regressor_hidden_dims=None):
     """Factory: encoder is already built (e.g. GraphCNN). D = node HV dimension from encoder."""
     return AttnGVFARegressor(
         encoder, D,
@@ -151,4 +166,5 @@ def build_attn_gvfa_regressor(encoder, D, readout_hidden=None, regressor_hidden=
         dropout=dropout,
         use_layernorm=use_layernorm,
         num_heads=num_heads,
+        regressor_hidden_dims=regressor_hidden_dims,
     )
