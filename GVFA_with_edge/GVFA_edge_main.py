@@ -286,6 +286,7 @@ def run_attn_gvfa(args, train_data, test_data, device):
 def main():
     args = parse_args()
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print("Running for dataset: ", args.dataset)
     train_data, test_data = load_data(dataset=args.dataset)
 
     if args.model == 'attn_gvfa':
