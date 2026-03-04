@@ -84,7 +84,7 @@ def parse_args():
                    choices=['old', 'solubility_novel', 'new'],
                    help='solubility_novel: train solubility_1.csv, test testset_novel.csv')
     p.add_argument('--dim', type=int, default=1000, help='VSA dimension')
-    p.add_argument('--dims', type=str, default='1000, 2000, 5000, 7000, 9000, 10000, 15000',
+    p.add_argument('--dims', type=str, default='1000, 2000, 5000, 10000, 15000',
                    help='Comma-separated dims for gvfa_ridge loop')
     p.add_argument('--epochs', type=int, default=200, help='Max epochs for attn_gvfa')
     p.add_argument('--batch_size', type=int, default=64)
