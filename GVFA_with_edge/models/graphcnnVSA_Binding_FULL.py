@@ -159,8 +159,9 @@ class GraphCNN(nn.Module):
         h = torch.zeros(N, D, device=feat.device, dtype=feat.dtype)
         for k, ctx_k in enumerate(contexts):
             weight = self.hop_decay ** k
+            ctx_k_enriched = self.sigma_pi_expansion(ctx_k)
             role_k = self.roles[k].unsqueeze(0).expand(N, -1)
-            h = h + weight * self.bind(role_k, ctx_k)
+            h = h + weight * self.bind(role_k, ctx_k_enriched)
         h = F.normalize(h, p=2, dim=1, eps=1e-8)
 
         if return_node_rep:
