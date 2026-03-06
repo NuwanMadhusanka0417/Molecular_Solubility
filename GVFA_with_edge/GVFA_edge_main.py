@@ -96,6 +96,10 @@ def parse_args():
     p.add_argument('--no_ridge', action='store_false', dest='use_ridge')
     p.add_argument('--attn_heads', type=int, default=1)
     p.add_argument('--seed', type=int, default=42)
+    p.add_argument('--sigma_pi_orders', type=str, default='0,1',
+                   help='Comma-separated sigma-pi orders, e.g. "0" for linear, "0,1" for 2nd-order')
+    p.add_argument('--sweep_sigma_pi', action='store_true', default=False,
+                   help='Sweep over multiple sigma-pi configs: linear, 2nd, 3rd, 4th order')
     return p.parse_args()
 
 
@@ -103,41 +107,67 @@ def parse_args():
 # GVFA + Ridge/XGBoost
 # ---------------------------------------------------------------------------
 
+def _parse_sigma_pi_orders(args):
+    """Return list of sigma_pi_orders configs to run."""
+    if args.sweep_sigma_pi:
+        return [
+            [0],           # linear
+            [0, 1],        # 2nd-order polynomial
+            [0, 1, 2],     # 3rd-order polynomial
+            [0, 1, 2, 3],  # 4th-order polynomial
+        ]
+    return [[int(x) for x in args.sigma_pi_orders.split(',')]]
+
+
+def _sigma_pi_label(orders):
+    if orders == [0]:
+        return "linear"
+    return f"poly-order-{max(orders)+1}"
+
+
 def run_gvfa_ridge(args, train_data, test_data, device):
     dims = [int(x) for x in args.dims.split(',')]
-    for dim in dims:
-        train_graphs = create_graph_list(train_data)
-        test_graphs = create_graph_list(test_data)
-        test_HVs = VSA_conversion(test_graphs.copy(), dim, projection_type="orthogonal")
-        train_HVs = VSA_conversion(train_graphs.copy(), dim, projection_type="orthogonal")
+    sigma_pi_configs = _parse_sigma_pi_orders(args)
 
-        model_eq1 = GraphCNN(
-            test_HVs[0].node_features.shape[1], 5, 1, 'sum', 'sum', device, 10,
-            edge_feat_dim=5, edge_projection_type="orthogonal",
-            use_reservoir=True, hop_decay=0.85, sigma_pi_orders=[0, 1],
-        )
-        train_emb, train_labels = getEmbedding(model_eq1, device, train_HVs, use_size_aware=True, hop_alpha=1.0)
-        test_emb, test_labels = getEmbedding(model_eq1, device, test_HVs, use_size_aware=True, hop_alpha=1.0)
-        train_emb = train_emb.squeeze(0)
-        test_emb = test_emb.squeeze(0)
+    for sp_orders in sigma_pi_configs:
+        sp_label = _sigma_pi_label(sp_orders)
+        print(f"\n{'='*60}")
+        print(f"Sigma-Pi config: {sp_orders} ({sp_label})")
+        print(f"{'='*60}")
 
-        if args.use_ridge:
-            reg = RidgeCV(alphas=np.logspace(-4, 2, 50), cv=5, scoring='neg_mean_squared_error')
-            reg.fit(train_emb, train_labels)
-            pred = reg.predict(test_emb)
-        else:
-            from xgboost import XGBRegressor
-            reg = XGBRegressor(
-                n_estimators=2000, learning_rate=0.03, max_depth=7,
-                subsample=0.8, colsample_bytree=0.8, reg_lambda=1.0, reg_alpha=0.0,
-                random_state=42, n_jobs=4, tree_method="hist",
+        for dim in dims:
+            train_graphs = create_graph_list(train_data)
+            test_graphs = create_graph_list(test_data)
+            test_HVs = VSA_conversion(test_graphs.copy(), dim, projection_type="orthogonal")
+            train_HVs = VSA_conversion(train_graphs.copy(), dim, projection_type="orthogonal")
+
+            model_eq1 = GraphCNN(
+                test_HVs[0].node_features.shape[1], 5, 1, 'sum', 'sum', device, 10,
+                edge_feat_dim=5, edge_projection_type="orthogonal",
+                use_reservoir=True, hop_decay=0.85, sigma_pi_orders=sp_orders,
             )
-            reg.fit(train_emb, train_labels, eval_set=[(test_emb, test_labels)], verbose=False)
-            pred = reg.predict(test_emb)
+            train_emb, train_labels = getEmbedding(model_eq1, device, train_HVs, use_size_aware=True, hop_alpha=1.0)
+            test_emb, test_labels = getEmbedding(model_eq1, device, test_HVs, use_size_aware=True, hop_alpha=1.0)
+            train_emb = train_emb.squeeze(0)
+            test_emb = test_emb.squeeze(0)
 
-        m = compute_metrics(test_labels, pred)
-        print(f"Dim={dim}  RMSE={m['rmse']:.4f}  MAE={m['mae']:.4f}  "
-              f"R2_COD={m['r2_cod']:.4f}  Pearson_R2={m['pearson_r2']:.4f}")
+            if args.use_ridge:
+                reg = RidgeCV(alphas=np.logspace(-4, 2, 50), cv=5, scoring='neg_mean_squared_error')
+                reg.fit(train_emb, train_labels)
+                pred = reg.predict(test_emb)
+            else:
+                from xgboost import XGBRegressor
+                reg = XGBRegressor(
+                    n_estimators=2000, learning_rate=0.03, max_depth=7,
+                    subsample=0.8, colsample_bytree=0.8, reg_lambda=1.0, reg_alpha=0.0,
+                    random_state=42, n_jobs=4, tree_method="hist",
+                )
+                reg.fit(train_emb, train_labels, eval_set=[(test_emb, test_labels)], verbose=False)
+                pred = reg.predict(test_emb)
+
+            m = compute_metrics(test_labels, pred)
+            print(f"  [{sp_label}] Dim={dim}  RMSE={m['rmse']:.4f}  MAE={m['mae']:.4f}  "
+                  f"R2_COD={m['r2_cod']:.4f}  Pearson_R2={m['pearson_r2']:.4f}")
 
 
 # ---------------------------------------------------------------------------
@@ -145,16 +175,25 @@ def run_gvfa_ridge(args, train_data, test_data, device):
 # ---------------------------------------------------------------------------
 
 def run_attn_gvfa(args, train_data, test_data, device):
+    sigma_pi_configs = _parse_sigma_pi_orders(args)
+
+    for sp_orders in sigma_pi_configs:
+        sp_label = _sigma_pi_label(sp_orders)
+        print(f"\n{'='*60}")
+        print(f"Sigma-Pi config: {sp_orders} ({sp_label})")
+        print(f"{'='*60}")
+        _run_attn_gvfa_single(args, train_data, test_data, device, sp_orders, sp_label)
+
+
+def _run_attn_gvfa_single(args, train_data, test_data, device, sp_orders, sp_label):
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
-    # ---- Build graphs and project to VSA space ----
     train_graphs = create_graph_list(train_data)
     test_graphs = create_graph_list(test_data)
     train_HVs = VSA_conversion(train_graphs, args.dim, projection_type="orthogonal")
     test_HVs = VSA_conversion(test_graphs, args.dim, projection_type="orthogonal")
 
-    # ---- Train / validation split (90 / 10 from training set) ----
     n = len(train_HVs)
     indices = np.arange(n)
     tr_idx, val_idx = train_test_split(indices, test_size=0.1, random_state=args.seed, shuffle=True)
@@ -166,19 +205,17 @@ def run_attn_gvfa(args, train_data, test_data, device):
     print_split_stats("Val", val_HVs)
     print_split_stats("Test (independent)", test_HVs)
 
-    # ---- Target standardization (fit on train split only) ----
     tr_labels = np.array([float(torch.as_tensor(g.label).item()) for g in tr_HVs])
     y_mean, y_std = float(tr_labels.mean()), float(tr_labels.std())
     if y_std < 1e-8:
         y_std = 1.0
     print(f"Target standardization: mean={y_mean:.4f}, std={y_std:.4f}")
 
-    # ---- Encoder (frozen) ----
     D = train_HVs[0].node_features.shape[1]
     encoder = GraphCNN(
         D, 5, 1, 'sum', 'sum', device, 10,
         edge_feat_dim=5, edge_projection_type="orthogonal",
-        use_reservoir=True, hop_decay=0.85, sigma_pi_orders=[0, 1],
+        use_reservoir=True, hop_decay=0.85, sigma_pi_orders=sp_orders,
     )
     encoder.to(device)
 
@@ -208,7 +245,7 @@ def run_attn_gvfa(args, train_data, test_data, device):
     best_val_rmse = float('inf')
     best_state = None
     wait = 0
-    best_path = os.path.join(args.save_dir, f"attn_gvfa_dim{args.dim}_best.pt")
+    best_path = os.path.join(args.save_dir, f"attn_gvfa_dim{args.dim}_{sp_label}_best.pt")
 
     # ---- Training loop ----
     for epoch in range(args.epochs):
@@ -268,7 +305,7 @@ def run_attn_gvfa(args, train_data, test_data, device):
     test_pred = test_pred_z * y_std + y_mean
     m = compute_metrics(test_true, test_pred)
 
-    print("\n=== Independent Test Results ===")
+    print(f"\n=== Independent Test Results [{sp_label}] ===")
     print(f"  RMSE:       {m['rmse']:.4f}")
     print(f"  MAE:        {m['mae']:.4f}")
     print(f"  R2 (COD):   {m['r2_cod']:.4f}")
