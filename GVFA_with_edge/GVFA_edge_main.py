@@ -84,7 +84,7 @@ def parse_args():
                    choices=['old', 'solubility_novel', 'new'],
                    help='solubility_novel: train solubility_1.csv, test testset_novel.csv')
     p.add_argument('--dim', type=int, default=1000, help='VSA dimension')
-    p.add_argument('--dims', type=str, default='1000, 2000, 5000, 10000, 15000',
+    p.add_argument('--dims', type=str, default='1000, 2000, 5000',
                    help='Comma-separated dims for gvfa_ridge loop')
     p.add_argument('--epochs', type=int, default=200, help='Max epochs for attn_gvfa')
     p.add_argument('--batch_size', type=int, default=64)
@@ -98,8 +98,12 @@ def parse_args():
     p.add_argument('--seed', type=int, default=42)
     p.add_argument('--sigma_pi_orders', type=str, default='0,1',
                    help='Comma-separated sigma-pi orders, e.g. "0" for linear, "0,1" for 2nd-order')
+    p.add_argument('--sigma_pi_mode', type=str, default='concat', choices=['concat', 'bundle'],
+                   help='How to combine sigma-pi terms: concat or bundle')
     p.add_argument('--sweep_sigma_pi', action='store_true', default=False,
                    help='Sweep over multiple sigma-pi configs: linear, 2nd, 3rd, 4th order')
+    p.add_argument('--full_sweep', action='store_true', default=False,
+                   help='Run all sigma-pi experiments: individual orders + concat combos + bundle combos')
     return p.parse_args()
 
 
@@ -107,67 +111,115 @@ def parse_args():
 # GVFA + Ridge/XGBoost
 # ---------------------------------------------------------------------------
 
-def _parse_sigma_pi_orders(args):
-    """Return list of sigma_pi_orders configs to run."""
+def _parse_sigma_pi_configs(args):
+    """Return list of (orders, mode, label) tuples to run."""
+    if args.full_sweep:
+        configs = []
+        for t in range(4):
+            configs.append(([t], "concat", f"order-{t}-only"))
+        for orders in [[0, 1], [0, 1, 2], [0, 1, 2, 3]]:
+            label = f"orders-{','.join(map(str, orders))}-concat"
+            configs.append((orders, "concat", label))
+        for orders in [[0, 1], [0, 1, 2], [0, 1, 2, 3]]:
+            label = f"orders-{','.join(map(str, orders))}-bundle"
+            configs.append((orders, "bundle", label))
+        return configs
+
+    orders = [int(x) for x in args.sigma_pi_orders.split(',')]
+    mode = getattr(args, 'sigma_pi_mode', 'concat')
     if args.sweep_sigma_pi:
-        return [
-            [0],           # linear
-            [0, 1],        # 2nd-order polynomial
-            [0, 1, 2],     # 3rd-order polynomial
-            [0, 1, 2, 3],  # 4th-order polynomial
-        ]
-    return [[int(x) for x in args.sigma_pi_orders.split(',')]]
+        configs = []
+        for o in [[0], [0, 1], [0, 1, 2], [0, 1, 2, 3]]:
+            label = f"orders-{','.join(map(str, o))}-{mode}"
+            configs.append((o, mode, label))
+        return configs
+
+    label = f"orders-{','.join(map(str, orders))}-{mode}"
+    return [(orders, mode, label)]
 
 
-def _sigma_pi_label(orders):
-    if orders == [0]:
-        return "linear"
-    return f"poly-order-{max(orders)+1}"
+def _run_single_ridge(args, train_data, test_data, device, dim, sp_orders, sp_mode):
+    """Run a single (dim, orders, mode) config. Returns metrics dict."""
+    train_graphs = create_graph_list(train_data)
+    test_graphs = create_graph_list(test_data)
+    test_HVs = VSA_conversion(test_graphs.copy(), dim, projection_type="orthogonal")
+    train_HVs = VSA_conversion(train_graphs.copy(), dim, projection_type="orthogonal")
+
+    model_eq1 = GraphCNN(
+        test_HVs[0].node_features.shape[1], 5, 1, 'sum', 'sum', device, 10,
+        edge_feat_dim=5, edge_projection_type="orthogonal",
+        use_reservoir=True, hop_decay=0.85,
+        sigma_pi_orders=sp_orders, sigma_pi_mode=sp_mode,
+    )
+    train_emb, train_labels = getEmbedding(model_eq1, device, train_HVs, use_size_aware=True, hop_alpha=1.0)
+    test_emb, test_labels = getEmbedding(model_eq1, device, test_HVs, use_size_aware=True, hop_alpha=1.0)
+    train_emb = train_emb.squeeze(0)
+    test_emb = test_emb.squeeze(0)
+
+    if args.use_ridge:
+        reg = RidgeCV(alphas=np.logspace(-4, 2, 50), cv=5, scoring='neg_mean_squared_error')
+        reg.fit(train_emb, train_labels)
+        pred = reg.predict(test_emb)
+    else:
+        from xgboost import XGBRegressor
+        reg = XGBRegressor(
+            n_estimators=2000, learning_rate=0.03, max_depth=7,
+            subsample=0.8, colsample_bytree=0.8, reg_lambda=1.0, reg_alpha=0.0,
+            random_state=42, n_jobs=4, tree_method="hist",
+        )
+        reg.fit(train_emb, train_labels, eval_set=[(test_emb, test_labels)], verbose=False)
+        pred = reg.predict(test_emb)
+
+    return compute_metrics(test_labels, pred)
 
 
 def run_gvfa_ridge(args, train_data, test_data, device):
     dims = [int(x) for x in args.dims.split(',')]
-    sigma_pi_configs = _parse_sigma_pi_orders(args)
+    configs = _parse_sigma_pi_configs(args)
+    all_results = []
 
-    for sp_orders in sigma_pi_configs:
-        sp_label = _sigma_pi_label(sp_orders)
-        print(f"\n{'='*60}")
-        print(f"Sigma-Pi config: {sp_orders} ({sp_label})")
-        print(f"{'='*60}")
+    for sp_orders, sp_mode, sp_label in configs:
+        print(f"\n{'='*70}")
+        print(f"  Sigma-Pi config: orders={sp_orders}  mode={sp_mode}  ({sp_label})")
+        print(f"{'='*70}")
 
         for dim in dims:
-            train_graphs = create_graph_list(train_data)
-            test_graphs = create_graph_list(test_data)
-            test_HVs = VSA_conversion(test_graphs.copy(), dim, projection_type="orthogonal")
-            train_HVs = VSA_conversion(train_graphs.copy(), dim, projection_type="orthogonal")
-
-            model_eq1 = GraphCNN(
-                test_HVs[0].node_features.shape[1], 5, 1, 'sum', 'sum', device, 10,
-                edge_feat_dim=5, edge_projection_type="orthogonal",
-                use_reservoir=True, hop_decay=0.85, sigma_pi_orders=sp_orders,
-            )
-            train_emb, train_labels = getEmbedding(model_eq1, device, train_HVs, use_size_aware=True, hop_alpha=1.0)
-            test_emb, test_labels = getEmbedding(model_eq1, device, test_HVs, use_size_aware=True, hop_alpha=1.0)
-            train_emb = train_emb.squeeze(0)
-            test_emb = test_emb.squeeze(0)
-
-            if args.use_ridge:
-                reg = RidgeCV(alphas=np.logspace(-4, 2, 50), cv=5, scoring='neg_mean_squared_error')
-                reg.fit(train_emb, train_labels)
-                pred = reg.predict(test_emb)
-            else:
-                from xgboost import XGBRegressor
-                reg = XGBRegressor(
-                    n_estimators=2000, learning_rate=0.03, max_depth=7,
-                    subsample=0.8, colsample_bytree=0.8, reg_lambda=1.0, reg_alpha=0.0,
-                    random_state=42, n_jobs=4, tree_method="hist",
-                )
-                reg.fit(train_emb, train_labels, eval_set=[(test_emb, test_labels)], verbose=False)
-                pred = reg.predict(test_emb)
-
-            m = compute_metrics(test_labels, pred)
-            print(f"  [{sp_label}] Dim={dim}  RMSE={m['rmse']:.4f}  MAE={m['mae']:.4f}  "
+            m = _run_single_ridge(args, train_data, test_data, device, dim, sp_orders, sp_mode)
+            all_results.append({
+                "label": sp_label, "dim": dim, "orders": str(sp_orders),
+                "mode": sp_mode, **m,
+            })
+            print(f"  Dim={dim:>6d}  RMSE={m['rmse']:.4f}  MAE={m['mae']:.4f}  "
                   f"R2_COD={m['r2_cod']:.4f}  Pearson_R2={m['pearson_r2']:.4f}")
+
+    _print_summary_table(all_results)
+
+
+def _print_summary_table(all_results):
+    """Print a formatted summary table of all experiment results."""
+    print(f"\n\n{'#'*80}")
+    print(f"{'SUMMARY OF ALL RESULTS':^80}")
+    print(f"{'#'*80}")
+
+    header = f"{'Config':<30s} {'Dim':>6s}  {'RMSE':>7s}  {'MAE':>7s}  {'R2_COD':>7s}  {'P_R2':>7s}"
+    print(f"\n{header}")
+    print("-" * len(header))
+    for r in all_results:
+        print(f"{r['label']:<30s} {r['dim']:>6d}  {r['rmse']:>7.4f}  {r['mae']:>7.4f}  "
+              f"{r['r2_cod']:>7.4f}  {r['pearson_r2']:>7.4f}")
+
+    dims = sorted(set(r['dim'] for r in all_results))
+    labels = list(dict.fromkeys(r['label'] for r in all_results))
+
+    for dim in dims:
+        print(f"\n--- Dim = {dim} ---")
+        print(f"  {'Config':<35s} {'RMSE':>7s}  {'MAE':>7s}  {'R2_COD':>7s}  {'P_R2':>7s}")
+        print(f"  {'-'*70}")
+        for label in labels:
+            matches = [r for r in all_results if r['dim'] == dim and r['label'] == label]
+            for r in matches:
+                print(f"  {r['label']:<35s} {r['rmse']:>7.4f}  {r['mae']:>7.4f}  "
+                      f"{r['r2_cod']:>7.4f}  {r['pearson_r2']:>7.4f}")
 
 
 # ---------------------------------------------------------------------------
@@ -175,17 +227,16 @@ def run_gvfa_ridge(args, train_data, test_data, device):
 # ---------------------------------------------------------------------------
 
 def run_attn_gvfa(args, train_data, test_data, device):
-    sigma_pi_configs = _parse_sigma_pi_orders(args)
+    configs = _parse_sigma_pi_configs(args)
 
-    for sp_orders in sigma_pi_configs:
-        sp_label = _sigma_pi_label(sp_orders)
-        print(f"\n{'='*60}")
-        print(f"Sigma-Pi config: {sp_orders} ({sp_label})")
-        print(f"{'='*60}")
-        _run_attn_gvfa_single(args, train_data, test_data, device, sp_orders, sp_label)
+    for sp_orders, sp_mode, sp_label in configs:
+        print(f"\n{'='*70}")
+        print(f"  Sigma-Pi config: orders={sp_orders}  mode={sp_mode}  ({sp_label})")
+        print(f"{'='*70}")
+        _run_attn_gvfa_single(args, train_data, test_data, device, sp_orders, sp_mode, sp_label)
 
 
-def _run_attn_gvfa_single(args, train_data, test_data, device, sp_orders, sp_label):
+def _run_attn_gvfa_single(args, train_data, test_data, device, sp_orders, sp_mode, sp_label):
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
@@ -215,13 +266,16 @@ def _run_attn_gvfa_single(args, train_data, test_data, device, sp_orders, sp_lab
     encoder = GraphCNN(
         D, 5, 1, 'sum', 'sum', device, 10,
         edge_feat_dim=5, edge_projection_type="orthogonal",
-        use_reservoir=True, hop_decay=0.85, sigma_pi_orders=sp_orders,
+        use_reservoir=True, hop_decay=0.85,
+        sigma_pi_orders=sp_orders, sigma_pi_mode=sp_mode,
     )
     encoder.to(device)
+    D_out = encoder.output_node_dim
+    print(f"Encoder output node dim: {D_out} (T={len(sp_orders)} x D={D}, mode={sp_mode})")
 
     # ---- Model: attention readout + deeper MLP regressor ----
     model = AttnGVFARegressor(
-        encoder, D,
+        encoder, D_out,
         readout_hidden=128,
         regressor_hidden=64,
         dropout=args.dropout,

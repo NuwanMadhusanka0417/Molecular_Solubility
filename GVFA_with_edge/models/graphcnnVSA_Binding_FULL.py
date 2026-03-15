@@ -8,7 +8,7 @@ sys.path.append("models/")
 from models.mlp import MLP
 
 class GraphCNN(nn.Module):
-    def __init__(self, input_dim, num_layers, delta, graph_pooling_type, neighbor_pooling_type, device, equation, edge_feat_dim=5, edge_projection_type="orthogonal", use_reservoir=False, reservoir_iters=7, reservoir_alpha=0.8, reservoir_polynomial_order=2, reservoir_history_weight=0.75, use_resonator=False, resonator_iters=7, resonator_beta=0.75, hop_decay=0.85, sigma_pi_orders=None):
+    def __init__(self, input_dim, num_layers, delta, graph_pooling_type, neighbor_pooling_type, device, equation, edge_feat_dim=5, edge_projection_type="orthogonal", use_reservoir=False, reservoir_iters=7, reservoir_alpha=0.8, reservoir_polynomial_order=2, reservoir_history_weight=0.75, use_resonator=False, resonator_iters=7, resonator_beta=0.75, hop_decay=0.85, sigma_pi_orders=None, sigma_pi_mode="concat"):
         '''
             use_reservoir: VSA-RC (VSA Reservoir Computing): tap buffer + Sigma-Pi polynomial expansion
             reservoir_iters, reservoir_alpha, reservoir_history_weight: unused (kept for compat)
@@ -38,6 +38,8 @@ class GraphCNN(nn.Module):
         self.resonator_beta = resonator_beta
         self.hop_decay = hop_decay if use_reservoir else 1.0
         self.sigma_pi_orders = sigma_pi_orders if sigma_pi_orders is not None else [0, 1]
+        self.sigma_pi_mode = sigma_pi_mode
+        self.input_dim = input_dim
 
         if self.edge_feat_dim > 0:
             g = torch.Generator().manual_seed(0)
@@ -50,6 +52,13 @@ class GraphCNN(nn.Module):
             else:
                 W_edge = W_edge / math.sqrt(self.edge_feat_dim)
             self.register_buffer("W_edge", W_edge)
+
+    @property
+    def output_node_dim(self):
+        """Effective per-node output dim: T*D for concat mode, D for bundle mode."""
+        if self.use_reservoir and self.sigma_pi_mode == "concat":
+            return len(self.sigma_pi_orders) * self.input_dim
+        return self.input_dim
 
     def __preprocess_neighbors_sumavepool(self, batch_graph):
         ###create block diagonal sparse matrix
@@ -138,6 +147,7 @@ class GraphCNN(nn.Module):
         messages = self.bind(neighbor_h, edge_H)
         pooled = torch.zeros(num_nodes, D, device=h_to_pool.device, dtype=h_to_pool.dtype)
         pooled.index_add_(0, dst, messages)
+        # pooled = F.normalize(pooled, p=2, dim=1)
         if average:
             degree = torch.zeros(num_nodes, 1, device=h_to_pool.device, dtype=h_to_pool.dtype)
             degree.index_add_(0, dst.unsqueeze(1), torch.ones(E, 1, device=h_to_pool.device, dtype=h_to_pool.dtype))
@@ -217,22 +227,32 @@ class GraphCNN(nn.Module):
 
     def sigma_pi_expansion(self, F1, eps=1e-8):
         """
-        Sigma-Pi polynomial expansion: F_v = sum_{t in T} *_t(F_v^(1)).
-        *_0(F)=F, *_t(F)= pi(*_{t-1}(F)) circ F (VSA binding).
+        Sigma-Pi polynomial expansion.
+        Always iterates 0..max(sigma_pi_orders) to build the recursion correctly.
+        mode="concat": concatenate selected orders → [N, T*D]
+        mode="bundle": sum selected orders into one vector → [N, D]
         """
         D = F1.shape[1]
-        result = torch.zeros_like(F1)
+        selected_orders = set(self.sigma_pi_orders)
+        max_order = max(self.sigma_pi_orders)
+        terms = []
         ast_prev = F1
-        for t in sorted(self.sigma_pi_orders):
+        for t in range(max_order + 1):
             if t == 0:
                 ast_t = F1
             else:
                 ast_t = self.bind(self._pi(ast_prev, shift=max(1, D // 3)), F1)
                 ast_t = F.normalize(ast_t, p=2, dim=1, eps=eps)
             ast_prev = ast_t
-            result = result + ast_t
-        return F.normalize(result, p=2, dim=1, eps=eps)
+            if t in selected_orders:
+                terms.append(F.normalize(ast_t, p=2, dim=1, eps=eps))
 
+        if self.sigma_pi_mode == "bundle":
+            result = torch.zeros_like(F1)
+            for term in terms:
+                result = result + term
+            return F.normalize(result, p=2, dim=1, eps=eps)
+        return torch.cat(terms, dim=1)
     def multi_stat_pool(self, F_v, graph_pool, start_idx, eps=1e-8):
         """
         Multi-stat pooling: g = [mean_v(F_v) | max_v(F_v) | mean_v(F_v circ F_v)].
@@ -332,6 +352,7 @@ class GraphCNN(nn.Module):
             pooled = self._pool_neighbors(rotated, Adj_block, padded_neighbor_list, edge_index, edge_H, num_nodes)
             if delta == 1:
                 pooled = self.bind(h, pooled) + h
+                # pooled = F.normalize(pooled, p=2, dim=1) 
             elif delta == 2:
                 pooled = self.bind(h, pooled) + h + pooled
             else:
