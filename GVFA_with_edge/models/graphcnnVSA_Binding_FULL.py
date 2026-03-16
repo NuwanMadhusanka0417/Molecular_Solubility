@@ -351,8 +351,12 @@ class GraphCNN(nn.Module):
             rotated = torch.roll(h.clone(), shifts=shift, dims=1)
             pooled = self._pool_neighbors(rotated, Adj_block, padded_neighbor_list, edge_index, edge_H, num_nodes)
             if delta == 1:
-                pooled = self.bind(h, pooled) + h
+                # pooled = self.bind(h, pooled) + h
                 # pooled = F.normalize(pooled, p=2, dim=1) 
+                bound = self.bind(h, pooled)
+                bound = F.normalize(bound, p=2, dim=1)  # normalize binding output
+                pooled = bound + h                       # residual connection
+                # normalize final output
             elif delta == 2:
                 pooled = self.bind(h, pooled) + h + pooled
             else:
@@ -379,7 +383,8 @@ class GraphCNN(nn.Module):
                 pooled = pooled + h
             pooled = torch.roll(pooled, shifts=shift, dims=1)
 
-        pooled = torch.sign(pooled)
+        # pooled = torch.sign(pooled)
+        pooled = F.normalize(pooled, p=2, dim=1) 
         return pooled
 
 
