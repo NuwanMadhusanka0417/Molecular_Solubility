@@ -351,12 +351,13 @@ class GraphCNN(nn.Module):
             rotated = torch.roll(h.clone(), shifts=shift, dims=1)
             pooled = self._pool_neighbors(rotated, Adj_block, padded_neighbor_list, edge_index, edge_H, num_nodes)
             if delta == 1:
-                # pooled = self.bind(h, pooled) + h
+                pooled = self.bind(h, pooled) + h
                 # pooled = F.normalize(pooled, p=2, dim=1) 
-                bound = self.bind(h, pooled)
-                bound = F.normalize(bound, p=2, dim=1)  # normalize binding output
-                pooled = bound + h                       # residual connection
+                # bound = self.bind(h, pooled)
+                # bound = F.normalize(bound, p=2, dim=1)  # normalize binding output
+                # pooled = bound + h                       # residual connection
                 # normalize final output
+                
             elif delta == 2:
                 pooled = self.bind(h, pooled) + h + pooled
             else:
@@ -383,9 +384,9 @@ class GraphCNN(nn.Module):
                 pooled = pooled + h
             pooled = torch.roll(pooled, shifts=shift, dims=1)
 
-        # pooled = torch.sign(pooled)
-        pooled = F.normalize(pooled, p=2, dim=1) 
-        return pooled
+        pooled_binz = torch.sign(pooled)
+        pooled_norm = F.normalize(pooled, p=2, dim=1) 
+        return pooled_binz, pooled_norm
 
 
 
@@ -415,9 +416,10 @@ class GraphCNN(nn.Module):
 
         hidden_rep = [X_concat]
         h = X_concat
+        pooled_norm = h.clone()
         for layer in range(self.num_layers - 1):
-            h = self.next_layer_eps(
-                h, layer,
+            pooled_binz, pooled_norm = self.next_layer_eps(
+                pooled_norm, layer,
                 Adj_block=Adj_block,
                 delta=self.delta,
                 equation=self.equation,
@@ -425,7 +427,7 @@ class GraphCNN(nn.Module):
                 edge_H=edge_H,
                 num_nodes=num_nodes,
             )
-            hidden_rep.append(h)
+            hidden_rep.append(pooled_binz)
 
         # VSA-RC: tap buffer + Sigma-Pi; then either node-level (H, batch) or graph-level g
         if self.use_reservoir:
