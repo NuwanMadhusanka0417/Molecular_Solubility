@@ -1,14 +1,17 @@
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.fft import fft, ifft
 import math
 import sys
 sys.path.append("models/")
 from models.mlp import MLP
 
+_BINDING_CHOICES = frozenset({"circular_conv", "hadamard"})
+
+
 class GraphCNN(nn.Module):
-    def __init__(self, input_dim, num_layers, delta, graph_pooling_type, neighbor_pooling_type, device, equation, edge_feat_dim=5, edge_projection_type="orthogonal", use_reservoir=False, reservoir_iters=7, reservoir_alpha=0.8, reservoir_polynomial_order=2, reservoir_history_weight=0.75, use_resonator=False, resonator_iters=7, resonator_beta=0.75, hop_decay=0.85, sigma_pi_orders=None, sigma_pi_mode="concat"):
+    def __init__(self, input_dim, num_layers, delta, graph_pooling_type, neighbor_pooling_type, device, equation, edge_feat_dim=5, edge_projection_type="orthogonal", use_reservoir=False, reservoir_iters=7, reservoir_alpha=0.8, reservoir_polynomial_order=2, reservoir_history_weight=0.75, use_resonator=False, resonator_iters=7, resonator_beta=0.75, hop_decay=0.85, sigma_pi_orders=None, sigma_pi_mode="bundle", gvfa_binding_mode="circular_conv", other_binding_mode="circular_conv"):
         '''
             use_reservoir: VSA-RC (VSA Reservoir Computing): tap buffer + Sigma-Pi polynomial expansion
             reservoir_iters, reservoir_alpha, reservoir_history_weight: unused (kept for compat)
@@ -16,10 +19,17 @@ class GraphCNN(nn.Module):
             hop_decay: lambda in [0.6, 0.95], decay for far-hop mixing in tap buffer
             sigma_pi_orders: list of orders T, e.g. [0,1] for 1st+2nd order (recommended)
             use_resonator: legacy fallback (deprecated)
+            gvfa_binding_mode: "circular_conv" (FFT circular convolution, default) or "hadamard" (element-wise)
+                for next_layer_eps / GVFA message binding (h with pooled neighbors).
+            other_binding_mode: same choices for edge messages, sigma-pi binds, multi_stat_pool bind(F,F), resonator, etc.
         '''
 
         super(GraphCNN, self).__init__()
         print("Input feature size: ", input_dim)
+        if gvfa_binding_mode not in _BINDING_CHOICES or other_binding_mode not in _BINDING_CHOICES:
+            raise ValueError(f"binding modes must be in {_BINDING_CHOICES}, got gvfa={gvfa_binding_mode!r} other={other_binding_mode!r}")
+        self.gvfa_binding_mode = gvfa_binding_mode
+        self.other_binding_mode = other_binding_mode
         self.device = device
         self.num_layers = num_layers
         self.graph_pooling_type = graph_pooling_type
@@ -136,7 +146,7 @@ class GraphCNN(nn.Module):
 
     def _edge_message_pool(self, h_to_pool, edge_index, edge_H, num_nodes, average=False):
         """
-        Edge-conditioned message passing: for each edge (src, dst), message = bind(h_to_pool[src], edge_H[e]),
+        Edge-conditioned message passing: for each edge (src, dst), message = bind_other(h_to_pool[src], edge_H[e]),
         then aggregate at dst. Caller passes rotated or plain h as h_to_pool. Physically: combine
         neighbour atom with the bond along that edge, send message along that bond.
         """
@@ -144,7 +154,7 @@ class GraphCNN(nn.Module):
         D = h_to_pool.shape[1]
         src, dst = edge_index[0], edge_index[1]
         neighbor_h = h_to_pool[src]
-        messages = self.bind(neighbor_h, edge_H)
+        messages = self.bind_other(neighbor_h, edge_H)
         pooled = torch.zeros(num_nodes, D, device=h_to_pool.device, dtype=h_to_pool.dtype)
         pooled.index_add_(0, dst, messages)
         # pooled = F.normalize(pooled, p=2, dim=1)
@@ -170,19 +180,34 @@ class GraphCNN(nn.Module):
         matrix[torch.arange(n), perm] = 1
         return matrix
     
+    def _bind_circular_convolution(self, x, y):
+        """Circular convolution along hypervector dimension (VSA binding via FFT). x,y: [N, D] real."""
+        if x.shape != y.shape:
+            raise ValueError(f"bind shapes must match, got {x.shape} vs {y.shape}")
+        D = x.shape[1]
+        Xf = torch.fft.rfft(x, n=D, dim=1)
+        Yf = torch.fft.rfft(y, n=D, dim=1)
+        Zf = Xf * Yf
+        return torch.fft.irfft(Zf, n=D, dim=1)
+
+    def _binding_dispatch(self, x, y, mode: str):
+        if mode == "hadamard":
+            return x * y
+        if mode == "circular_conv":
+            return self._bind_circular_convolution(x, y)
+        raise ValueError(f"unknown binding mode {mode!r}")
+
+    def bind_gvfa(self, x, y):
+        """Binding in GVFA layers (next_layer_eps: h with pooled neighbor representation)."""
+        return self._binding_dispatch(x, y, self.gvfa_binding_mode)
+
+    def bind_other(self, x, y):
+        """Binding elsewhere: edges, sigma-pi expansion, multi_stat_pool F∘F, resonator, legacy reservoir."""
+        return self._binding_dispatch(x, y, self.other_binding_mode)
+
     def bind(self, x, y):
-        # Perform FFT on each hypervector in the tensors
-        fft_self = fft(x, dim=1)
-        fft_other = fft(y, dim=1)
-
-        # Multiply element-wise in the frequency domain
-        product = torch.mul(fft_self, fft_other)
-
-        # Perform inverse FFT to get back to the spatial domain
-        result = ifft(product, dim=1)
-
-        # Return the real part of the result as the final bound hypervectors
-        return torch.real(result)
+        """Deprecated: use bind_gvfa or bind_other. Defaults to other_binding for backward compatibility."""
+        return self.bind_other(x, y)
 
     def permute_hv(self, x, shift=1):
         """Cyclic permutation to encode structural/temporal relationships (P_bef in Gayler 2023)."""
@@ -198,7 +223,7 @@ class GraphCNN(nn.Module):
         """VSA message passing: bind neighbor states with edge features, aggregate at dst."""
         src, dst = edge_index[0], edge_index[1]
         neighbor_h = node_H[src]
-        messages = self.bind(neighbor_h, edge_H)
+        messages = self.bind_other(neighbor_h, edge_H)
         aggregated = torch.zeros_like(node_H)
         aggregated.index_add_(0, dst, self.reservoir_alpha * messages)
         norm = aggregated.norm(p=2, dim=1, keepdim=True).clamp(min=eps)
@@ -213,24 +238,30 @@ class GraphCNN(nn.Module):
         s = shift if shift is not None else max(1, x.shape[1] // 3)
         return torch.roll(x, shifts=int(s), dims=1)
 
-    def tap_buffer(self, hidden_rep, eps=1e-8):
+    def tap_buffer(self, hidden_rep, eps=1e-8, return_pre_norm=False):
         """
         RC-style tap buffer per node: F_v^(1) = sum_k lambda^k * rho^k(h_v^(k)).
         hidden_rep: list of [N, D] tensors, one per hop k=0..K.
+        If return_pre_norm, also return the summed vector before L2 normalization.
         """
         F1 = torch.zeros_like(hidden_rep[0], device=hidden_rep[0].device, dtype=hidden_rep[0].dtype)
         for k, h_k in enumerate(hidden_rep):
             weight = self.hop_decay ** k
             permuted = self._rho_k(h_k, k)
             F1 = F1 + weight * permuted
-        return F.normalize(F1, p=2, dim=1, eps=eps)
+        F1_pre = F1.clone()
+        F1n = F.normalize(F1, p=2, dim=1, eps=eps)
+        if return_pre_norm:
+            return F1_pre, F1n
+        return F1n
 
-    def sigma_pi_expansion(self, F1, eps=1e-8):
+    def sigma_pi_expansion(self, F1, eps=1e-8, per_order_batches=None):
         """
         Sigma-Pi polynomial expansion.
         Always iterates 0..max(sigma_pi_orders) to build the recursion correctly.
         mode="concat": concatenate selected orders → [N, T*D]
         mode="bundle": sum selected orders into one vector → [N, D]
+        If per_order_batches is a dict, append each batch's [N,D] tensor per order t to per_order_batches[t].
         """
         D = F1.shape[1]
         selected_orders = set(self.sigma_pi_orders)
@@ -241,18 +272,47 @@ class GraphCNN(nn.Module):
             if t == 0:
                 ast_t = F1
             else:
-                ast_t = self.bind(self._pi(ast_prev, shift=max(1, D // 3)), F1)
+                ast_t = self.bind_other(self._pi(ast_prev, shift=max(1, D // 3)), F1)
                 ast_t = F.normalize(ast_t, p=2, dim=1, eps=eps)
             ast_prev = ast_t
             if t in selected_orders:
-                terms.append(F.normalize(ast_t, p=2, dim=1, eps=eps))
+                term = F.normalize(ast_t, p=2, dim=1, eps=eps)
+                terms.append(term)
+                if per_order_batches is not None:
+                    per_order_batches.setdefault(t, []).append(term.detach().cpu().float().numpy())
 
         if self.sigma_pi_mode == "bundle":
             result = torch.zeros_like(F1)
             for term in terms:
                 result = result + term
-            return F.normalize(result, p=2, dim=1, eps=eps)
-        return torch.cat(terms, dim=1)
+            result = F.normalize(result, p=2, dim=1, eps=eps)
+        else:
+            result = torch.cat(terms, dim=1)
+        return result
+
+    def sigma_pi_all_orders_0_to_3(self, F1, eps=1e-8):
+        """
+        Fixed orders 0..3 for analysis export: four [N,D] terms, bundle [N,D], concat [N,4D].
+        Independent of self.sigma_pi_orders / sigma_pi_mode used for the forward pass output.
+        """
+        D = F1.shape[1]
+        terms = []
+        ast_prev = F1
+        for t in range(4):
+            if t == 0:
+                ast_t = F1
+            else:
+                ast_t = self.bind_other(self._pi(ast_prev, shift=max(1, D // 3)), F1)
+                ast_t = F.normalize(ast_t, p=2, dim=1, eps=eps)
+            ast_prev = ast_t
+            terms.append(F.normalize(ast_t, p=2, dim=1, eps=eps))
+        bundle = torch.zeros_like(F1)
+        for t in terms:
+            bundle = bundle + t
+        bundle = F.normalize(bundle, p=2, dim=1, eps=eps)
+        concat = torch.cat(terms, dim=1)
+        return terms, bundle, concat
+
     def multi_stat_pool(self, F_v, graph_pool, start_idx, eps=1e-8):
         """
         Multi-stat pooling: g = [mean_v(F_v) | max_v(F_v) | mean_v(F_v circ F_v)].
@@ -263,7 +323,7 @@ class GraphCNN(nn.Module):
         D = F_v.shape[1]
         g_mean = torch.spmm(graph_pool, F_v)
         g_max = self._segment_max(F_v, graph_pool, start_idx, num_graphs)
-        F_sq = self.bind(F_v, F_v)
+        F_sq = self.bind_other(F_v, F_v)
         g_mean_sq = torch.spmm(graph_pool, F_sq)
         num_nodes = torch.tensor(
             [start_idx[i + 1] - start_idx[i] for i in range(num_graphs)],
@@ -294,7 +354,7 @@ class GraphCNN(nn.Module):
         for _ in range(self.reservoir_iters):
             messages = self.reservoir_message_passing(x_state, edge_H, edge_index)
             x_permuted = self.permute_hv(x_state, shift=1)
-            interaction = self.bind(messages, x_permuted)
+            interaction = self.bind_other(messages, x_permuted)
             if self.reservoir_polynomial_order >= 2:
                 w_msg = (1 - self.reservoir_history_weight) * 0.5
                 w_state = self.reservoir_history_weight * 0.5
@@ -314,7 +374,7 @@ class GraphCNN(nn.Module):
         for _ in range(iterations):
             messages = torch.zeros_like(current)
             neighbor_h = current[src]
-            msg = self.bind(edge_H, neighbor_h)
+            msg = self.bind_other(edge_H, neighbor_h)
             messages.index_add_(0, dst, msg)
             msg_norm = messages.norm(p=2, dim=1, keepdim=True).clamp(min=1e-8)
             messages = messages / msg_norm
@@ -351,7 +411,7 @@ class GraphCNN(nn.Module):
             rotated = torch.roll(h.clone(), shifts=shift, dims=1)
             pooled = self._pool_neighbors(rotated, Adj_block, padded_neighbor_list, edge_index, edge_H, num_nodes)
             if delta == 1:
-                pooled = self.bind(h, pooled) + h
+                pooled = self.bind_gvfa(h, pooled) + h
                 # pooled = F.normalize(pooled, p=2, dim=1) 
                 # bound = self.bind(h, pooled)
                 # bound = F.normalize(bound, p=2, dim=1)  # normalize binding output
@@ -359,16 +419,16 @@ class GraphCNN(nn.Module):
                 # normalize final output
                 
             elif delta == 2:
-                pooled = self.bind(h, pooled) + h + pooled
+                pooled = self.bind_gvfa(h, pooled) + h + pooled
             else:
                 pooled = pooled + h
 
         elif equation == 11:
             pooled = self._pool_neighbors(h, Adj_block, padded_neighbor_list, edge_index, edge_H, num_nodes)
             if delta == 1:
-                pooled = self.bind(h, pooled) + h
+                pooled = self.bind_gvfa(h, pooled) + h
             elif delta == 2:
-                pooled = self.bind(h, pooled) + h + pooled
+                pooled = self.bind_gvfa(h, pooled) + h + pooled
             else:
                 pooled = pooled + h
             pooled = torch.roll(pooled, shifts=shift, dims=1)
@@ -377,24 +437,26 @@ class GraphCNN(nn.Module):
             rotated = torch.roll(h.clone(), shifts=shift, dims=1)
             pooled = self._pool_neighbors(rotated, Adj_block, padded_neighbor_list, edge_index, edge_H, num_nodes)
             if delta == 1:
-                pooled = self.bind(h, pooled) + h
+                pooled = self.bind_gvfa(h, pooled) + h
             elif delta == 2:
-                pooled = self.bind(h, pooled) + h + pooled
+                pooled = self.bind_gvfa(h, pooled) + h + pooled
             else:
                 pooled = pooled + h
             pooled = torch.roll(pooled, shifts=shift, dims=1)
 
         pooled_binz = torch.sign(pooled)
-        pooled_norm = F.normalize(pooled, p=2, dim=1) 
-        return pooled_binz, pooled_norm
+        pooled_norm = F.normalize(pooled, p=2, dim=1)
+        return pooled, pooled_binz, pooled_norm
 
 
 
 
-    def forward(self, batch_graph, return_embedding=False, return_node_rep=False):
+    def forward(self, batch_graph, return_embedding=False, return_node_rep=False, analysis_layout_batches=None):
         """
         return_node_rep: if True, return (H, batch) with H [N, D] node hypervectors and batch [N]
                          for use with attention readout. Only one of graph-level or node-level is returned.
+        analysis_layout_batches: if a list, each forward appends one batch record (dict of numpy arrays)
+            for experiment_D{dim}_seed{seed} layout export under train/ and test/ (see hv_analysis_save).
         """
         start_idx = [0]
         for g in batch_graph:
@@ -417,8 +479,10 @@ class GraphCNN(nn.Module):
         hidden_rep = [X_concat]
         h = X_concat
         pooled_norm = h.clone()
+        gvfa_layer_list = [X_concat]
+        last_pre = last_bin = last_l2 = None
         for layer in range(self.num_layers - 1):
-            pooled_binz, pooled_norm = self.next_layer_eps(
+            pooled_pre, pooled_binz, pooled_norm = self.next_layer_eps(
                 pooled_norm, layer,
                 Adj_block=Adj_block,
                 delta=self.delta,
@@ -427,12 +491,47 @@ class GraphCNN(nn.Module):
                 edge_H=edge_H,
                 num_nodes=num_nodes,
             )
+            last_pre, last_bin, last_l2 = pooled_pre, pooled_binz, pooled_norm
             hidden_rep.append(pooled_binz)
+            gvfa_layer_list.append(pooled_binz)
 
         # VSA-RC: tap buffer + Sigma-Pi; then either node-level (H, batch) or graph-level g
         if self.use_reservoir:
-            F1 = self.tap_buffer(hidden_rep)
+            if analysis_layout_batches is not None:
+                F1_pre, F1 = self.tap_buffer(hidden_rep, return_pre_norm=True)
+            else:
+                F1 = self.tap_buffer(hidden_rep)
+
             F_v = self.sigma_pi_expansion(F1)
+
+            if analysis_layout_batches is not None:
+                terms_s, bundle_s, concat_s = self.sigma_pi_all_orders_0_to_3(F1)
+                g_float = self.multi_stat_pool(last_pre, graph_pool, start_idx)
+                g_bin = self.multi_stat_pool(last_bin, graph_pool, start_idx)
+                g_l2 = self.multi_stat_pool(last_l2, graph_pool, start_idx)
+                Df = X_concat.shape[1]
+                edge_np = (
+                    edge_H.detach().cpu().float().numpy()
+                    if edge_H is not None
+                    else np.zeros((0, Df), dtype=np.float32)
+                )
+                rec = {
+                    "node_projected": X_concat.detach().cpu().float().numpy(),
+                    "edge_hv": edge_np,
+                }
+                for k in range(5):
+                    rec[f"layer_{k}"] = gvfa_layer_list[k].detach().cpu().float().numpy()
+                rec["pooled_float32"] = g_float.detach().cpu().float().numpy()
+                rec["pooled_binarized"] = g_bin.detach().cpu().float().numpy()
+                rec["pooled_normalized"] = g_l2.detach().cpu().float().numpy()
+                rec["tap_pre_l2"] = F1_pre.detach().cpu().float().numpy()
+                rec["tap_post_l2"] = F1.detach().cpu().float().numpy()
+                for t in range(4):
+                    rec[f"sigma_order_{t}"] = terms_s[t].detach().cpu().float().numpy()
+                rec["sigma_bundle"] = bundle_s.detach().cpu().float().numpy()
+                rec["sigma_concat"] = concat_s.detach().cpu().float().numpy()
+                analysis_layout_batches.append(rec)
+
             if return_node_rep:
                 batch = torch.zeros(N, dtype=torch.long, device=F_v.device)
                 for b in range(B):

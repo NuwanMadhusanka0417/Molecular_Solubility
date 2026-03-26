@@ -28,5 +28,8 @@ python GVFA_edge_main.py --sweep_sigma_pi --sigma_pi_mode concat
 
 python GVFA_edge_main.py --full_sweep
 
+--gvfa_binding_mode {circular_conv, hadamard} default circular_conv
+--other_binding_mode {circular_conv, hadamard} default circular_conv
+Passed into both GraphCNN constructions; save_analysis_data cfg includes these keys.
 
 Can select concat or bundle method to run code

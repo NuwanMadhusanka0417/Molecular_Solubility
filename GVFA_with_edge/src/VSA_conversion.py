@@ -68,20 +68,21 @@ def _random_projection_matrix(in_dim, out_dim, orthogonal=False, seed=0):
     return W
 
 
-def project_with_vsa(g_list, new_dim, projection_type="orthogonal"):
+def project_with_vsa(g_list, new_dim, projection_type="orthogonal", projection_seed=0):
     """
     Project node features to hypervectors only.
 
-    Edge conditioning is done solely in GraphCNN (single projection + FFT binding)
+    Edge conditioning is done solely in GraphCNN (single projection + binding)
     so edge_attr is not projected or used here.
 
     projection_type: "orthogonal" (default) = orthonormal random projection, better
         preserves norms and distances; "gaussian" = standard JL-style random projection.
+    projection_seed: RNG seed for the random projection matrix (for multi-seed studies).
     """
-    torch.manual_seed(0)
+    torch.manual_seed(projection_seed)
     F_node = g_list[0].node_features.shape[1]
     use_orthogonal = projection_type == "orthogonal"
-    W_node = _random_projection_matrix(F_node, new_dim, orthogonal=use_orthogonal, seed=0)
+    W_node = _random_projection_matrix(F_node, new_dim, orthogonal=use_orthogonal, seed=projection_seed)
 
     print("VSA_conversion: node feature dim =", F_node, "new_dim =", new_dim,
           "projection =", projection_type)
@@ -94,12 +95,13 @@ def project_with_vsa(g_list, new_dim, projection_type="orthogonal"):
     print("g list item shape after VSA:", g_list[0].node_features.shape)
     return g_list
 
-def VSA_conversion(g_list, new_dim=None, projection_type="orthogonal"):
+def VSA_conversion(g_list, new_dim=None, projection_type="orthogonal", projection_seed=0):
     """
     Build neighbors & edge_mat for GraphCNN. If new_dim is set, project node
     features to HVs only (edge conditioning is done solely in GraphCNN).
 
     projection_type: "orthogonal" (info-preserving) or "gaussian".
+    projection_seed: seed for random projection matrix (default 0).
     """
     # Build neighbors and edge_mat; use edge_index when available (aligns with edge_attr)
     for g in g_list:
@@ -124,7 +126,7 @@ def VSA_conversion(g_list, new_dim=None, projection_type="orthogonal"):
     if not new_dim:
         return g_list
 
-    g_list = project_with_vsa(g_list, new_dim, projection_type=projection_type)
+    g_list = project_with_vsa(g_list, new_dim, projection_type=projection_type, projection_seed=projection_seed)
     return g_list
 '''
 def project_node_features(g_list, original_feature_dim, new_dim):
