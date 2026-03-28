@@ -105,7 +105,7 @@ def load_data(dataset="old", train_path=None, test_path=None, smiles_col=None, t
     test_path  = test_path  or "final_data/final_unique_test.csv"
     smiles_col = smiles_col or "smiles_canon"
     target_col = target_col or "LogS"
-    print(train_path)
+    # print(train_path)
 
     train_df = pd.read_csv(train_path)
     train_df = train_df.dropna(subset=[smiles_col, target_col])

@@ -25,7 +25,7 @@ class GraphCNN(nn.Module):
         '''
 
         super(GraphCNN, self).__init__()
-        print("Input feature size: ", input_dim)
+        # print("Input feature size: ", input_dim)
         if gvfa_binding_mode not in _BINDING_CHOICES or other_binding_mode not in _BINDING_CHOICES:
             raise ValueError(f"binding modes must be in {_BINDING_CHOICES}, got gvfa={gvfa_binding_mode!r} other={other_binding_mode!r}")
         self.gvfa_binding_mode = gvfa_binding_mode
