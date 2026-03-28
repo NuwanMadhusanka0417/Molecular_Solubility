@@ -89,12 +89,17 @@ def parse_args():
         choices=["old", "solubility_novel", "new"],
         help="solubility_novel: train solubility_1.csv, test testset_novel.csv",
     )
-    p.add_argument("--dim", type=int, default=1000, help="VSA dimension (used only if --dims is empty)")
+    p.add_argument(
+        "--dim",
+        type=int,
+        default=1000,
+        help="Single VSA dimension (used only when --dims is empty)",
+    )
     p.add_argument(
         "--dims",
         type=str,
-        default="",
-        help="Comma-separated VSA dimensions (loops each). If empty, uses --dim once.",
+        default="1000,2000,5000,10000",
+        help="Comma-separated VSA dimensions (one full pipeline per value). Default: 1000,2000,5000,10000. Use empty string with --dim for a single size.",
     )
     p.add_argument("--k_folds", type=int, default=5, help="K for K-fold CV on training embeddings")
     p.add_argument("--seed", type=int, default=42, help="Random seed for KFold shuffle")
