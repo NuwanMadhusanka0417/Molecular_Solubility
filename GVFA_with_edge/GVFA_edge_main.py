@@ -12,7 +12,7 @@ import os
 
 from src.create_graphs import create_graph_list
 from src.load_data import load_data
-from src.VSA_conversion import VSA_conversion
+from src.VSA_conversion import VSA_conversion, configure_other_binding
 from src.embeddings import getEmbedding
 from models.graphcnnVSA_Binding_FULL import GraphCNN
 from models.attn_gvfa_readout import AttnGVFARegressor
@@ -96,6 +96,16 @@ def parse_args():
     p.add_argument('--no_ridge', action='store_false', dest='use_ridge')
     p.add_argument('--attn_heads', type=int, default=1)
     p.add_argument('--seed', type=int, default=42)
+    p.add_argument(
+        '--gvfa-binding', type=str, default='circular',
+        choices=['circular', 'elementwise'],
+        help='Binding inside GraphCNN (GVFA): circular=FFT/HRR, elementwise=Hadamard',
+    )
+    p.add_argument(
+        '--other-binding', type=str, default='elementwise',
+        choices=['circular', 'elementwise'],
+        help='Default for hv_bind / vsa_message_passing (configure_other_binding)',
+    )
     return p.parse_args()
 
 
@@ -115,6 +125,7 @@ def run_gvfa_ridge(args, train_data, test_data, device):
             test_HVs[0].node_features.shape[1], 5, 1, 'sum', 'sum', device, 10,
             edge_feat_dim=5, edge_projection_type="orthogonal",
             use_reservoir=True, hop_decay=0.85, sigma_pi_orders=[0, 1],
+            gvfa_binding=args.gvfa_binding,
         )
         train_emb, train_labels = getEmbedding(model_eq1, device, train_HVs, use_size_aware=True, hop_alpha=1.0)
         test_emb, test_labels = getEmbedding(model_eq1, device, test_HVs, use_size_aware=True, hop_alpha=1.0)
@@ -179,6 +190,7 @@ def run_attn_gvfa(args, train_data, test_data, device):
         D, 5, 1, 'sum', 'sum', device, 10,
         edge_feat_dim=5, edge_projection_type="orthogonal",
         use_reservoir=True, hop_decay=0.85, sigma_pi_orders=[0, 1],
+        gvfa_binding=args.gvfa_binding,
     )
     encoder.to(device)
 
@@ -285,8 +297,10 @@ def run_attn_gvfa(args, train_data, test_data, device):
 
 def main():
     args = parse_args()
+    configure_other_binding(args.other_binding)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print("Running for dataset: ", args.dataset)
+    print(f"GVFA binding (GraphCNN): {args.gvfa_binding}  |  other binding (hv_bind default): {args.other_binding}")
     train_data, test_data = load_data(dataset=args.dataset)
 
     if args.model == 'attn_gvfa':

@@ -3,15 +3,32 @@ import torch
 import numpy as np
 import math
 import torch.nn.functional as F
-# import torch
-def hv_bind(a, b):
-    """
-    Hypervector binding for bipolar HVs: elementwise multiplication.
-    a, b: [D]
-    """
-    return a * b
+from src.binding_ops import bind_hypervectors
 
-def vsa_message_passing(node_H, edge_H, edge_index, alpha=1.0):
+_DEFAULT_OTHER_BINDING = "elementwise"
+
+
+def configure_other_binding(mode: str):
+    """
+    Set default binding for hv_bind / vsa_message_passing when mode is not passed explicitly.
+    mode: "circular" (FFT / circular convolution) or "elementwise" (Hadamard).
+    """
+    if mode not in ("circular", "elementwise"):
+        raise ValueError('configure_other_binding: mode must be "circular" or "elementwise"')
+    global _DEFAULT_OTHER_BINDING
+    _DEFAULT_OTHER_BINDING = mode
+
+
+def hv_bind(a, b, binding_mode=None):
+    """
+    Hypervector binding. Default mode follows configure_other_binding() (elementwise unless changed).
+    a, b: same shape; hypervector dimension is the last dimension.
+    """
+    mode = binding_mode if binding_mode is not None else _DEFAULT_OTHER_BINDING
+    return bind_hypervectors(a, b, mode=mode, dim=-1)
+
+
+def vsa_message_passing(node_H, edge_H, edge_index, alpha=1.0, binding_mode=None):
     """
     One GNN-style message passing step in VSA space.
 
@@ -35,8 +52,8 @@ def vsa_message_passing(node_H, edge_H, edge_index, alpha=1.0):
         hv = node_H[v]
 
         # message from v -> u and u -> v
-        msg_u = hv_bind(b, hv)
-        msg_v = hv_bind(b, hu)
+        msg_u = hv_bind(b, hv, binding_mode=binding_mode)
+        msg_v = hv_bind(b, hu, binding_mode=binding_mode)
 
         messages[u] += msg_u
         messages[v] += msg_v
