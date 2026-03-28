@@ -23,7 +23,7 @@ class GraphCNN(nn.Module):
         '''
 
         super(GraphCNN, self).__init__()
-        print("Input feature size: ", input_dim)
+        # print("Input feature size: ", input_dim)
         self.device = device
         self.num_layers = num_layers
         self.graph_pooling_type = graph_pooling_type

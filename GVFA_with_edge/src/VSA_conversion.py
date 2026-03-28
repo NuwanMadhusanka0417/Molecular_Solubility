@@ -100,15 +100,15 @@ def project_with_vsa(g_list, new_dim, projection_type="orthogonal"):
     use_orthogonal = projection_type == "orthogonal"
     W_node = _random_projection_matrix(F_node, new_dim, orthogonal=use_orthogonal, seed=0)
 
-    print("VSA_conversion: node feature dim =", F_node, "new_dim =", new_dim,
-          "projection =", projection_type)
+    # print("VSA_conversion: node feature dim =", F_node, "new_dim =", new_dim,
+        #   "projection =", projection_type)
 
     for g in g_list:
         X = g.node_features  # [N, F_node]
         node_H = torch.matmul(X, W_node)  # [N, D]
         g.node_features = node_H
 
-    print("g list item shape after VSA:", g_list[0].node_features.shape)
+    # print("g list item shape after VSA:", g_list[0].node_features.shape)
     return g_list
 
 def VSA_conversion(g_list, new_dim=None, projection_type="orthogonal"):

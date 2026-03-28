@@ -8,3 +8,18 @@ qsub -I  -l walltime=30:00:00,mem=100GB,ncpus=28,jobfs=50GB -P mi23 -l storage=g
 cd /g/data/jq77/nuwan/Molecular_Solubility/GVFA/
 
 python3 GVFA_with_traditional.py --hv_dim 2100
+
+
+CUDA_VISIBLE_DEVICES= python GVFA_edge_main.py --gvfa_binding_mode circular_conv --other_binding_mode hadamard --sigma_pi_orders 0,1 --dims 10000
+
+
+python GVFA_edge_main.py --gvfa-binding circular --other-binding elementwise
+python GVFA_edge_main.py --model attn_gvfa --gvfa-binding elementwise --other-binding circular
+
+
+CUDA_VISIBLE_DEVICES=  python GVFA_edge_main.py --gvfa-binding circular --other-binding elementwise
+CUDA_VISIBLE_DEVICES=  python GVFA_edge_main.py --gvfa-binding elementwise --other-binding elementwise
+
+CUDA_VISIBLE_DEVICES=  python GVFA_edge_main.py --gvfa-binding circular --other-binding circular
+
+python GVFA_edge_main.py --dataset solubility_novel --k_folds 5
