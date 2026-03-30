@@ -5,8 +5,12 @@ Pipeline: GVFA encoder -> embeddings -> Ridge or XGBoost.
 Reports K-fold CV (mean ± std on held-out folds), then full-training and test metrics.
 
 Train: solubility_1.csv.  Test: testset_novel.csv.
+
+Use --save-analysis to dump node-level tensors and logS (y_node) to .npz (+ JSON sign stats).
 """
 import argparse
+import json
+import os
 
 from src.create_graphs import create_graph_list
 from src.load_data import load_data
@@ -76,6 +80,69 @@ def _print_cv_mean_std(name, ms_std):
         print(f"  {label}: {mu:.4f} ± {sd:.4f}")
 
 
+def _capture_to_numpy(cap):
+    return {k: (v.numpy() if isinstance(v, torch.Tensor) else v) for k, v in cap.items()}
+
+
+def _merge_analysis_batches(batch_dicts):
+    """Concatenate node dimension (axis 0) for each array key."""
+    if not batch_dicts:
+        return {}
+    keys = batch_dicts[0].keys()
+    out = {}
+    for k in keys:
+        parts = [b[k] for b in batch_dicts]
+        out[k] = np.concatenate(parts, axis=0)
+    return out
+
+
+def _sign_distribution_stats(merged_np):
+    """After torch.sign: fractions of +1, -1, 0 in layer_*_post_sign tensors."""
+    stats = {}
+    for k, arr in merged_np.items():
+        if "post_sign" not in k:
+            continue
+        a = np.asarray(arr).ravel()
+        stats[k] = {
+            "frac_positive": float(np.mean(a > 0)),
+            "frac_negative": float(np.mean(a < 0)),
+            "frac_zero": float(np.mean(a == 0)),
+        }
+    return stats
+
+
+@torch.no_grad()
+def export_gvfa_analysis(model, graphs, device, out_npz_path, batch_size=8, meta=None):
+    """
+    Run GraphCNN with analysis_capture over batches; save merged .npz + JSON sidecar with sign stats.
+    """
+    model.to(device)
+    model.eval()
+    batch_dicts = []
+    graph_offset = 0
+    for start in range(0, len(graphs), batch_size):
+        bg = graphs[start : start + batch_size]
+        cap = {}
+        model(bg, analysis_capture=cap)
+        cap = _capture_to_numpy(cap)
+        cap["graph_id"] = np.asarray(cap["graph_id"], dtype=np.int64) + graph_offset
+        graph_offset += len(bg)
+        batch_dicts.append(cap)
+
+    merged = _merge_analysis_batches(batch_dicts)
+    os.makedirs(os.path.dirname(out_npz_path) or ".", exist_ok=True)
+    np.savez_compressed(out_npz_path, **merged)
+
+    side = {"npz": os.path.basename(out_npz_path), "n_nodes": int(merged["y_node"].shape[0])}
+    if meta:
+        side.update(meta)
+    side["sign_distribution_post_sign_layers"] = _sign_distribution_stats(merged)
+    json_path = os.path.splitext(out_npz_path)[0] + "_meta.json"
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(side, f, indent=2)
+    print(f"  Saved analysis: {out_npz_path}  ({side['n_nodes']} nodes)  meta: {json_path}")
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -119,6 +186,23 @@ def parse_args():
         choices=["circular", "elementwise"],
         help="Default for hv_bind / vsa_message_passing (configure_other_binding)",
     )
+    p.add_argument(
+        "--save-analysis",
+        action="store_true",
+        help="Save node-level HV tensors + y (logS) to .npz for sigma-pi / binarization analysis",
+    )
+    p.add_argument(
+        "--analysis-dir",
+        type=str,
+        default="gvfa_analysis_dump",
+        help="Output directory for --save-analysis",
+    )
+    p.add_argument(
+        "--analysis-batch-size",
+        type=int,
+        default=8,
+        help="Batch size when running analysis export (lower if GPU OOM)",
+    )
     return p.parse_args()
 
 
@@ -157,6 +241,36 @@ def run_gvfa_ridge(args, train_data, test_data, device):
             sigma_pi_orders=[0, 1],
             gvfa_binding=args.gvfa_binding,
         )
+        if args.save_analysis:
+            os.makedirs(args.analysis_dir, exist_ok=True)
+            meta = {
+                "dataset": args.dataset,
+                "dim": dim,
+                "gvfa_binding": args.gvfa_binding,
+                "sigma_pi_orders": [0, 1],
+            }
+            train_npz = os.path.join(
+                args.analysis_dir, f"gvfa_analysis_train_dim{dim}.npz"
+            )
+            test_npz = os.path.join(args.analysis_dir, f"gvfa_analysis_test_dim{dim}.npz")
+            print("\n--- Exporting GVFA analysis tensors ---")
+            export_gvfa_analysis(
+                model_eq1,
+                train_HVs,
+                device,
+                train_npz,
+                batch_size=args.analysis_batch_size,
+                meta={**meta, "split": "train"},
+            )
+            export_gvfa_analysis(
+                model_eq1,
+                test_HVs,
+                device,
+                test_npz,
+                batch_size=args.analysis_batch_size,
+                meta={**meta, "split": "test"},
+            )
+
         train_emb, train_labels_t = getEmbedding(
             model_eq1, device, train_HVs, use_size_aware=True, hop_alpha=1.0
         )

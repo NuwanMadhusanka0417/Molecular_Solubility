@@ -211,10 +211,11 @@ class GraphCNN(nn.Module):
             F1 = F1 + weight * permuted
         return F.normalize(F1, p=2, dim=1, eps=eps)
 
-    def sigma_pi_expansion(self, F1, eps=1e-8):
+    def sigma_pi_expansion(self, F1, eps=1e-8, order_tensors_out=None):
         """
         Sigma-Pi polynomial expansion: F_v = sum_{t in T} *_t(F_v^(1)).
         *_0(F)=F, *_t(F)= pi(*_{t-1}(F)) circ F (VSA binding).
+        If order_tensors_out is a dict, store each order's ast_t on CPU (float32) under key t.
         """
         D = F1.shape[1]
         result = torch.zeros_like(F1)
@@ -226,6 +227,8 @@ class GraphCNN(nn.Module):
                 ast_t = self.bind(self._pi(ast_prev, shift=max(1, D // 3)), F1)
                 ast_t = F.normalize(ast_t, p=2, dim=1, eps=eps)
             ast_prev = ast_t
+            if order_tensors_out is not None:
+                order_tensors_out[t] = ast_t.detach().cpu().float()
             result = result + ast_t
         return F.normalize(result, p=2, dim=1, eps=eps)
 
@@ -354,16 +357,20 @@ class GraphCNN(nn.Module):
                 pooled = pooled + h
             pooled = torch.roll(pooled, shifts=shift, dims=1)
 
+        pre_sign = pooled.clone()
         pooled = torch.sign(pooled)
-        return pooled
+        return pooled, pre_sign
 
 
 
 
-    def forward(self, batch_graph, return_embedding=False, return_node_rep=False):
+    def forward(self, batch_graph, return_embedding=False, return_node_rep=False, analysis_capture=None):
         """
         return_node_rep: if True, return (H, batch) with H [N, D] node hypervectors and batch [N]
                          for use with attention readout. Only one of graph-level or node-level is returned.
+        analysis_capture: optional dict; filled with CPU float32 tensors for offline analysis:
+            X_concat, layer_{k}_pre_sign / layer_{k}_post_sign, F1_tap_buffer, sigma_pi_order_{t},
+            F_v_after_sigma_pi, y_node, graph_id (per-node logS and graph index in batch).
         """
         start_idx = [0]
         for g in batch_graph:
@@ -385,8 +392,19 @@ class GraphCNN(nn.Module):
 
         hidden_rep = [X_concat]
         h = X_concat
+        if analysis_capture is not None:
+            analysis_capture["X_concat"] = X_concat.detach().cpu().float()
+            y_list, gid_list = [], []
+            for gi, g in enumerate(batch_graph):
+                yv = float(torch.as_tensor(g.label).item())
+                nn = len(g.g)
+                y_list.extend([yv] * nn)
+                gid_list.extend([gi] * nn)
+            analysis_capture["y_node"] = torch.tensor(y_list, dtype=torch.float32)
+            analysis_capture["graph_id"] = torch.tensor(gid_list, dtype=torch.int64)
+
         for layer in range(self.num_layers - 1):
-            h = self.next_layer_eps(
+            h, pre_sign = self.next_layer_eps(
                 h, layer,
                 Adj_block=Adj_block,
                 delta=self.delta,
@@ -396,11 +414,21 @@ class GraphCNN(nn.Module):
                 num_nodes=num_nodes,
             )
             hidden_rep.append(h)
+            if analysis_capture is not None:
+                analysis_capture[f"layer_{layer}_pre_sign"] = pre_sign.detach().cpu().float()
+                analysis_capture[f"layer_{layer}_post_sign"] = h.detach().cpu().float()
 
         # VSA-RC: tap buffer + Sigma-Pi; then either node-level (H, batch) or graph-level g
         if self.use_reservoir:
             F1 = self.tap_buffer(hidden_rep)
-            F_v = self.sigma_pi_expansion(F1)
+            if analysis_capture is not None:
+                analysis_capture["F1_tap_buffer"] = F1.detach().cpu().float()
+            order_out = {} if analysis_capture is not None else None
+            F_v = self.sigma_pi_expansion(F1, order_tensors_out=order_out)
+            if analysis_capture is not None:
+                for t_key, ten in order_out.items():
+                    analysis_capture[f"sigma_pi_order_{t_key}"] = ten
+                analysis_capture["F_v_after_sigma_pi"] = F_v.detach().cpu().float()
             if return_node_rep:
                 batch = torch.zeros(N, dtype=torch.long, device=F_v.device)
                 for b in range(B):
