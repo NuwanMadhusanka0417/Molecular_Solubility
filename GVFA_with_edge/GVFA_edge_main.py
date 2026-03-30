@@ -1,8 +1,9 @@
 """
 GVFA for molecular solubility prediction.
 
-Pipeline: GVFA encoder -> embeddings -> Ridge or XGBoost.
-Reports K-fold CV (mean ± std on held-out folds), then full-training and test metrics.
+Pipeline: GVFA encoder -> embeddings -> RidgeCV on full training set -> train / test metrics.
+
+Optional: K-fold CV on training embeddings (--k_folds >= 2). Default is full-dataset Ridge only.
 
 Train: solubility_1.csv.  Test: testset_novel.csv.
 
@@ -148,7 +149,7 @@ def export_gvfa_analysis(model, graphs, device, out_npz_path, batch_size=8, meta
 # ---------------------------------------------------------------------------
 
 def parse_args():
-    p = argparse.ArgumentParser(description="GVFA + Ridge/XGBoost for molecular solubility")
+    p = argparse.ArgumentParser(description="GVFA + Ridge regression for molecular solubility")
     p.add_argument(
         "--dataset",
         type=str,
@@ -166,12 +167,16 @@ def parse_args():
         "--dims",
         type=str,
         default="1000,2000,5000,10000",
-        help="Comma-separated VSA dimensions (one full pipeline per value). Default: 1000,2000,5000,10000. Use empty string with --dim for a single size.",
+        help="Comma-separated VSA dimensions. Empty string uses --dim once.",
     )
-    p.add_argument("--k_folds", type=int, default=5, help="K for K-fold CV on training embeddings")
-    p.add_argument("--seed", type=int, default=42, help="Random seed for KFold shuffle")
-    p.add_argument("--use_ridge", action="store_true", default=True)
-    p.add_argument("--no_ridge", action="store_false", dest="use_ridge")
+    p.add_argument(
+        "--k_folds",
+        type=int,
+        default=0,
+        help="If >=2, run K-fold CV on training embeddings before the final Ridge fit. "
+        "Default 0: only fit Ridge on full training data (no K-fold block).",
+    )
+    p.add_argument("--seed", type=int, default=42, help="Random seed for KFold shuffle (when --k_folds>=2)")
     p.add_argument(
         "--gvfa-binding",
         type=str,
@@ -207,7 +212,7 @@ def parse_args():
 
 
 # ---------------------------------------------------------------------------
-# GVFA + Ridge/XGBoost
+# GVFA + Ridge
 # ---------------------------------------------------------------------------
 
 def run_gvfa_ridge(args, train_data, test_data, device):
@@ -224,7 +229,8 @@ def run_gvfa_ridge(args, train_data, test_data, device):
         train_HVs = VSA_conversion(train_graphs.copy(), dim, projection_type="orthogonal")
 
         n_train = len(train_HVs)
-        print(f"\n{'='*60}\nDim={dim}  |  training graphs: {n_train}  |  K-fold: {args.k_folds}\n{'='*60}")
+        kf_note = "off" if args.k_folds < 2 else str(args.k_folds)
+        print(f"\n{'='*60}\nDim={dim}  |  training graphs: {n_train}  |  K-fold CV: {kf_note}\n{'='*60}")
 
         model_eq1 = GraphCNN(
             test_HVs[0].node_features.shape[1],
@@ -282,71 +288,35 @@ def run_gvfa_ridge(args, train_data, test_data, device):
         train_y = np.asarray(train_labels_t.cpu().numpy().ravel(), dtype=np.float64)
         test_y = np.asarray(test_labels_t.cpu().numpy().ravel(), dtype=np.float64)
 
-        k = min(args.k_folds, n_train)
-        if k < 2:
-            print("  Warning: not enough training samples for K-fold; skipping CV.")
-            cv_ms_std = None
+        if args.k_folds < 2:
+            print("\n--- K-fold CV: skipped (default: use --k_folds 2 or higher to enable) ---")
         else:
-            kf = KFold(n_splits=k, shuffle=True, random_state=args.seed)
-            fold_rows = []
-            for fold_id, (tr_idx, va_idx) in enumerate(kf.split(np.arange(n_train))):
-                X_tr, X_va = train_emb[tr_idx], train_emb[va_idx]
-                y_tr, y_va = train_y[tr_idx], train_y[va_idx]
-
-                if args.use_ridge:
+            k = min(args.k_folds, n_train)
+            if k < 2:
+                print(
+                    "  Warning: not enough training graphs for K-fold (need at least 2); skipping CV."
+                )
+            else:
+                kf = KFold(n_splits=k, shuffle=True, random_state=args.seed)
+                fold_rows = []
+                for _, (tr_idx, va_idx) in enumerate(kf.split(np.arange(n_train))):
+                    X_tr, X_va = train_emb[tr_idx], train_emb[va_idx]
+                    y_tr, y_va = train_y[tr_idx], train_y[va_idx]
                     reg_fold = _fit_ridge_cv(X_tr, y_tr)
                     pred_va = reg_fold.predict(X_va)
-                else:
-                    from xgboost import XGBRegressor
+                    fold_rows.append(compute_metrics(y_va, pred_va))
 
-                    reg_fold = XGBRegressor(
-                        n_estimators=2000,
-                        learning_rate=0.03,
-                        max_depth=7,
-                        subsample=0.8,
-                        colsample_bytree=0.8,
-                        reg_lambda=1.0,
-                        reg_alpha=0.0,
-                        random_state=args.seed + fold_id,
-                        n_jobs=4,
-                        tree_method="hist",
-                    )
-                    reg_fold.fit(X_tr, y_tr, eval_set=[(X_va, y_va)], verbose=False)
-                    pred_va = reg_fold.predict(X_va)
+                cv_ms_std = _metrics_list_to_mean_std(fold_rows)
+                _print_cv_mean_std(f"K-fold CV (K={k}) validation", cv_ms_std)
 
-                fold_rows.append(compute_metrics(y_va, pred_va))
-
-            cv_ms_std = _metrics_list_to_mean_std(fold_rows)
-            _print_cv_mean_std(f"K-fold CV (K={k}) validation", cv_ms_std)
-
-        # ---- Fit on full training set; evaluate train (in-sample) and test ----
-        if args.use_ridge:
-            reg_full = _fit_ridge_cv(train_emb, train_y)
-            pred_train = reg_full.predict(train_emb)
-            pred_test = reg_full.predict(test_emb)
-        else:
-            from xgboost import XGBRegressor
-
-            reg_full = XGBRegressor(
-                n_estimators=2000,
-                learning_rate=0.03,
-                max_depth=7,
-                subsample=0.8,
-                colsample_bytree=0.8,
-                reg_lambda=1.0,
-                reg_alpha=0.0,
-                random_state=args.seed,
-                n_jobs=4,
-                tree_method="hist",
-            )
-            reg_full.fit(train_emb, train_y, eval_set=[(test_emb, test_y)], verbose=False)
-            pred_train = reg_full.predict(train_emb)
-            pred_test = reg_full.predict(test_emb)
+        reg_full = _fit_ridge_cv(train_emb, train_y)
+        pred_train = reg_full.predict(train_emb)
+        pred_test = reg_full.predict(test_emb)
 
         m_train = compute_metrics(train_y, pred_train)
         m_test = compute_metrics(test_y, pred_test)
 
-        print("\n--- Full training set (in-sample, all training data) ---")
+        print("\n--- Full training set (in-sample, Ridge on all training data) ---")
         _print_metrics_line("", m_train)
         print("\n--- Independent test set ---")
         _print_metrics_line("", m_test)
