@@ -215,14 +215,15 @@ class GraphCNN(nn.Module):
             F1 = F1 + weight * permuted
         return F.normalize(F1, p=2, dim=1, eps=eps)
 
-    def sigma_pi_expansion(self, F1, eps=1e-8):
+    def sigma_pi_expansion_and_terms(self, F1, eps=1e-8):
         """
-        Sigma-Pi polynomial expansion: F_v = sum_{t in T} *_t(F_v^(1)).
-        *_0(F)=F, *_t(F)= pi(*_{t-1}(F)) circ F (VSA binding).
+        Same computation as sigma_pi_expansion, also returns per-order hypervectors
+        (for analysis export). *_0(F)=F, *_t(F)= pi(*_{t-1}(F)) circ F.
         """
         D = F1.shape[1]
         result = torch.zeros_like(F1)
         ast_prev = F1
+        terms = {}
         for t in sorted(self.sigma_pi_orders):
             if t == 0:
                 ast_t = F1
@@ -231,7 +232,16 @@ class GraphCNN(nn.Module):
                 ast_t = F.normalize(ast_t, p=2, dim=1, eps=eps)
             ast_prev = ast_t
             result = result + ast_t
-        return F.normalize(result, p=2, dim=1, eps=eps)
+            terms[t] = ast_t.clone()
+        F_v = F.normalize(result, p=2, dim=1, eps=eps)
+        return F_v, terms
+
+    def sigma_pi_expansion(self, F1, eps=1e-8):
+        """
+        Sigma-Pi polynomial expansion: F_v = sum_{t in T} *_t(F_v^(1)).
+        """
+        F_v, _ = self.sigma_pi_expansion_and_terms(F1, eps=eps)
+        return F_v
 
     def multi_stat_pool(self, F_v, graph_pool, start_idx, eps=1e-8):
         """
@@ -323,7 +333,7 @@ class GraphCNN(nn.Module):
         return pooled
 
     def next_layer_eps(self, h, layer, padded_neighbor_list=None, Adj_block=None, delta=1, equation=10,
-                       edge_index=None, edge_H=None, num_nodes=None):
+                       edge_index=None, edge_H=None, num_nodes=None, return_pre_sign=False):
         shift = 1
         torch.manual_seed(0)
 
@@ -358,17 +368,23 @@ class GraphCNN(nn.Module):
                 pooled = pooled + h
             pooled = torch.roll(pooled, shifts=shift, dims=1)
 
+        pre_bin = pooled
         pooled = torch.sign(pooled)
+        if return_pre_sign:
+            return pooled, pre_bin
         return pooled
 
 
 
 
-    def forward(self, batch_graph, return_embedding=False, return_node_rep=False):
+    def forward(self, batch_graph, return_embedding=False, return_node_rep=False, capture_aux=False):
         """
         return_node_rep: if True, return (H, batch) with H [N, D] node hypervectors and batch [N]
                          for use with attention readout. Only one of graph-level or node-level is returned.
+        capture_aux: if True, fill self._aux with layer pre/post binarization HV and sigma-pi tensors
+                     (same forward math as capture_aux=False).
         """
+        self._aux = None
         start_idx = [0]
         for g in batch_graph:
             start_idx.append(start_idx[-1] + len(g.g))
@@ -389,29 +405,67 @@ class GraphCNN(nn.Module):
 
         hidden_rep = [X_concat]
         h = X_concat
+        layer_pre_bin, layer_post_bin = [], []
         for layer in range(self.num_layers - 1):
-            h = self.next_layer_eps(
-                h, layer,
-                Adj_block=Adj_block,
-                delta=self.delta,
-                equation=self.equation,
-                edge_index=edge_index,
-                edge_H=edge_H,
-                num_nodes=num_nodes,
-            )
+            if capture_aux:
+                h, pre = self.next_layer_eps(
+                    h, layer,
+                    Adj_block=Adj_block,
+                    delta=self.delta,
+                    equation=self.equation,
+                    edge_index=edge_index,
+                    edge_H=edge_H,
+                    num_nodes=num_nodes,
+                    return_pre_sign=True,
+                )
+                layer_pre_bin.append(pre.detach())
+                layer_post_bin.append(h.detach())
+            else:
+                h = self.next_layer_eps(
+                    h, layer,
+                    Adj_block=Adj_block,
+                    delta=self.delta,
+                    equation=self.equation,
+                    edge_index=edge_index,
+                    edge_H=edge_H,
+                    num_nodes=num_nodes,
+                )
             hidden_rep.append(h)
 
         # VSA-RC: tap buffer + Sigma-Pi; then either node-level (H, batch) or graph-level g
         if self.use_reservoir:
             F1 = self.tap_buffer(hidden_rep)
-            F_v = self.sigma_pi_expansion(F1)
+            if capture_aux:
+                F_v, sigma_terms = self.sigma_pi_expansion_and_terms(F1)
+            else:
+                F_v = self.sigma_pi_expansion(F1)
+            if capture_aux:
+                self._aux = {
+                    "layer_pre_bin": layer_pre_bin,
+                    "layer_post_bin": layer_post_bin,
+                    "F1_tap": F1.detach(),
+                    "sigma_pi_terms": {t: v.detach() for t, v in sigma_terms.items()},
+                    "sigma_pi_combined": F_v.detach(),
+                    "start_idx": [int(x) for x in start_idx],
+                }
             if return_node_rep:
                 batch = torch.zeros(N, dtype=torch.long, device=F_v.device)
                 for b in range(B):
                     batch[start_idx[b] : start_idx[b + 1]] = b
+                if capture_aux:
+                    self._aux["batch_node_graph_id"] = batch.detach().cpu()
                 return (F_v, batch)
             g = self.multi_stat_pool(F_v, graph_pool, start_idx)
             return g.unsqueeze(0)
+        if capture_aux:
+            self._aux = {
+                "layer_pre_bin": layer_pre_bin,
+                "layer_post_bin": layer_post_bin,
+                "F1_tap": None,
+                "sigma_pi_terms": None,
+                "sigma_pi_combined": None,
+                "start_idx": [int(x) for x in start_idx],
+            }
         # Legacy resonator: refine final layer only
         if edge_index is not None and edge_H is not None and self.use_resonator:
             hidden_rep[-1] = self.resonator_consensus(
@@ -425,6 +479,8 @@ class GraphCNN(nn.Module):
             batch = torch.zeros(N, dtype=torch.long, device=H.device)
             for b in range(B):
                 batch[start_idx[b] : start_idx[b + 1]] = b
+            if capture_aux and self._aux is not None:
+                self._aux["batch_node_graph_id"] = batch.detach().cpu()
             return (H, batch)
 
         pooled_hS = []

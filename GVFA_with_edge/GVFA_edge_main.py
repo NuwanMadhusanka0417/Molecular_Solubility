@@ -42,22 +42,66 @@ def _get_labels(graphs, device=None):
 
 
 def compute_metrics(y_true, y_pred):
-    """RMSE, MAE, R² (COD), Pearson R² — all on same arrays in original logS units."""
+    """RMSE, MAE, std of residuals, R² (COD), Pearson R² — all on same arrays in original logS units."""
     y_true = np.asarray(y_true).ravel()
     y_pred = np.asarray(y_pred).ravel()
-    rmse = np.sqrt(np.mean((y_true - y_pred) ** 2))
-    mae = np.mean(np.abs(y_true - y_pred))
-    sse = np.sum((y_true - y_pred) ** 2)
+    err = y_true - y_pred
+    rmse = np.sqrt(np.mean(err ** 2))
+    std_err = float(np.std(err, ddof=0))
+    mae = np.mean(np.abs(err))
+    sse = np.sum(err ** 2)
     sst = np.sum((y_true - np.mean(y_true)) ** 2)
     r2_cod = 1.0 - (sse / sst) if sst > 0 else 0.0
     pr, _ = pearsonr(y_true, y_pred) if len(y_true) >= 2 else (0.0, 1.0)
-    return {"rmse": rmse, "mae": mae, "r2_cod": r2_cod, "pearson_r2": pr ** 2, "pearson_r": pr}
+    return {
+        "rmse": rmse,
+        "std_err": std_err,
+        "mae": mae,
+        "r2_cod": r2_cod,
+        "pearson_r2": pr ** 2,
+        "pearson_r": pr,
+    }
 
 
 def print_split_stats(name, graphs):
     labels = np.array([float(torch.as_tensor(g.label).item()) for g in graphs])
     print(f"  {name}: n={len(labels)}, logS range=[{labels.min():.2f}, {labels.max():.2f}], "
           f"mean={labels.mean():.2f}, std={labels.std():.2f}")
+
+
+@torch.no_grad()
+def export_hypervector_analysis(encoder, graphs, device, out_dir, split_name, batch_size):
+    """
+    Save one compressed .npz per batch with node-level hypervectors and solubility labels.
+    encoder: GraphCNN with use_reservoir=True (same forward as training; capture_aux only adds storage).
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    encoder.eval()
+    batch_ix = 0
+    for start in range(0, len(graphs), batch_size):
+        bg = graphs[start : start + batch_size]
+        y = np.array([float(torch.as_tensor(g.label).item()) for g in bg], dtype=np.float32)
+        _ = encoder(bg, return_node_rep=True, capture_aux=True)
+        aux = getattr(encoder, "_aux", None)
+        if aux is None:
+            continue
+        payload = {"y": y, "start_idx": np.array(aux["start_idx"], dtype=np.int64)}
+        if aux.get("batch_node_graph_id") is not None:
+            payload["batch_node_graph_id"] = aux["batch_node_graph_id"].numpy()
+        for li, t in enumerate(aux["layer_pre_bin"]):
+            payload[f"layer_{li}_pre_bin"] = t.cpu().numpy().astype(np.float32)
+        for li, t in enumerate(aux["layer_post_bin"]):
+            payload[f"layer_{li}_post_bin"] = t.cpu().numpy().astype(np.float32)
+        if aux.get("F1_tap") is not None:
+            payload["F1_tap"] = aux["F1_tap"].cpu().numpy().astype(np.float32)
+        if aux.get("sigma_pi_terms") is not None:
+            for order, ten in aux["sigma_pi_terms"].items():
+                payload[f"sigma_pi_order_{order}"] = ten.cpu().numpy().astype(np.float32)
+        if aux.get("sigma_pi_combined") is not None:
+            payload["sigma_pi_combined"] = aux["sigma_pi_combined"].cpu().numpy().astype(np.float32)
+        path = os.path.join(out_dir, f"{split_name}_batch_{batch_ix:05d}.npz")
+        np.savez_compressed(path, **payload)
+        batch_ix += 1
 
 
 @torch.no_grad()
@@ -96,6 +140,11 @@ def parse_args():
     p.add_argument('--no_ridge', action='store_false', dest='use_ridge')
     p.add_argument('--attn_heads', type=int, default=1)
     p.add_argument('--seed', type=int, default=42)
+    p.add_argument(
+        '--export_analysis_dir', type=str, default=None,
+        help='If set, save per-batch .npz files: GVFA layer pre/post binarization HV, '
+             'sigma-pi per order + combined, F1 tap buffer, y (logS), and node graph ids.',
+    )
     return p.parse_args()
 
 
@@ -136,8 +185,17 @@ def run_gvfa_ridge(args, train_data, test_data, device):
             pred = reg.predict(test_emb)
 
         m = compute_metrics(test_labels, pred)
-        print(f"Dim={dim}  RMSE={m['rmse']:.4f}  MAE={m['mae']:.4f}  "
+        print(f"Dim={dim}  RMSE={m['rmse']:.4f}  STD_err={m['std_err']:.4f}  MAE={m['mae']:.4f}  "
               f"R2_COD={m['r2_cod']:.4f}  Pearson_R2={m['pearson_r2']:.4f}")
+        if args.export_analysis_dir:
+            sub = os.path.join(args.export_analysis_dir, f"ridge_dim_{dim}")
+            export_hypervector_analysis(
+                model_eq1, train_graphs, device, sub, "train", args.batch_size,
+            )
+            export_hypervector_analysis(
+                model_eq1, test_graphs, device, sub, "test", args.batch_size,
+            )
+            print(f"  Saved HV analysis under {sub}")
 
 
 # ---------------------------------------------------------------------------
@@ -251,7 +309,8 @@ def run_attn_gvfa(args, train_data, test_data, device):
         if (epoch + 1) % 10 == 0 or epoch == 0:
             lr_now = optimizer.param_groups[0]["lr"]
             print(f"Epoch {epoch+1:3d}  loss={epoch_loss/n_batches:.4f}  "
-                  f"val_RMSE={val_m['rmse']:.4f}  val_R2={val_m['r2_cod']:.4f}  lr={lr_now:.2e}")
+                  f"val_RMSE={val_m['rmse']:.4f}  val_STD_err={val_m['std_err']:.4f}  "
+                  f"val_R2={val_m['r2_cod']:.4f}  lr={lr_now:.2e}")
 
         if wait >= args.patience:
             print(f"Early stopping at epoch {epoch+1} (patience={args.patience})")
@@ -270,6 +329,7 @@ def run_attn_gvfa(args, train_data, test_data, device):
 
     print("\n=== Independent Test Results ===")
     print(f"  RMSE:       {m['rmse']:.4f}")
+    print(f"  STD (err):  {m['std_err']:.4f}")
     print(f"  MAE:        {m['mae']:.4f}")
     print(f"  R2 (COD):   {m['r2_cod']:.4f}")
     print(f"  Pearson R2: {m['pearson_r2']:.4f}")
@@ -277,6 +337,13 @@ def run_attn_gvfa(args, train_data, test_data, device):
           f"mean={test_true.mean():.2f}  std={test_true.std():.2f}")
     print(f"  y_pred:  min={test_pred.min():.2f}  max={test_pred.max():.2f}  "
           f"mean={test_pred.mean():.2f}  std={test_pred.std():.2f}")
+
+    if args.export_analysis_dir:
+        base = os.path.join(args.export_analysis_dir, f"attn_gvfa_dim_{args.dim}")
+        export_hypervector_analysis(model.encoder, tr_HVs, device, base, "train", args.batch_size)
+        export_hypervector_analysis(model.encoder, val_HVs, device, base, "val", args.batch_size)
+        export_hypervector_analysis(model.encoder, test_HVs, device, base, "test", args.batch_size)
+        print(f"\nSaved HV / sigma-pi analysis under {base}")
 
 
 # ---------------------------------------------------------------------------

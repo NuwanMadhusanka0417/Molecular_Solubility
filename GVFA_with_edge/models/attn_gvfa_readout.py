@@ -139,13 +139,14 @@ class AttnGVFARegressor(nn.Module):
         self.regressor = RegressorHead(D, hidden_dim=regressor_hidden, dropout=dropout,
                                        hidden_dims=regressor_hidden_dims)
 
-    def forward(self, batch_graph, return_embedding=False):
+    def forward(self, batch_graph, return_embedding=False, capture_aux=False):
         """
         batch_graph: list of S2VGraph (same interface as GraphCNN).
         Returns: yhat [B, 1]. If return_embedding, also return (g, yhat).
+        capture_aux: passed to encoder; fills encoder._aux for analysis export.
         """
         with torch.no_grad():
-            H, batch = self.encoder(batch_graph, return_node_rep=True)
+            H, batch = self.encoder(batch_graph, return_node_rep=True, capture_aux=capture_aux)
         g = self.attn_pool(H, batch)
         yhat = self.regressor(g)
         if return_embedding:
