@@ -3,7 +3,8 @@ GVFA for molecular solubility prediction.
 
 Pipeline: GVFA encoder -> embeddings -> RidgeCV on full training set -> train / test metrics.
 
-Optional: K-fold CV on training embeddings (--k_folds >= 2). Default is full-dataset Ridge only.
+Metrics include RMSE, MAE, R², Pearson R², and SD_resid (standard deviation of residuals
+y_true - y_pred) on each split — useful to report spread of errors without K-fold.
 
 Train: solubility_1.csv.  Test: testset_novel.csv.
 
@@ -22,7 +23,6 @@ from models.graphcnnVSA_Binding_FULL import GraphCNN
 import torch
 import numpy as np
 from scipy.stats import pearsonr
-from sklearn.model_selection import KFold
 from sklearn.linear_model import Ridge, RidgeCV
 
 
@@ -31,16 +31,34 @@ from sklearn.linear_model import Ridge, RidgeCV
 # ---------------------------------------------------------------------------
 
 def compute_metrics(y_true, y_pred):
-    """RMSE, MAE, R² (COD), Pearson R² — all on same arrays in original logS units."""
+    """
+    All in original logS units.
+
+    RMSE = sqrt(mean((y_i - yhat_i)^2)).
+
+    residual_std (SD_resid) = population std of per-sample residuals (y_true - y_pred):
+    spread of prediction errors around their mean on that set.
+    """
     y_true = np.asarray(y_true).ravel()
     y_pred = np.asarray(y_pred).ravel()
-    rmse = np.sqrt(np.mean((y_true - y_pred) ** 2))
-    mae = np.mean(np.abs(y_true - y_pred))
-    sse = np.sum((y_true - y_pred) ** 2)
+    resid = y_true - y_pred
+    rmse = np.sqrt(np.mean(resid ** 2))
+    mae = np.mean(np.abs(resid))
+    residual_std = float(np.std(resid, ddof=0)) if resid.size > 0 else 0.0
+    if resid.size < 2:
+        residual_std = 0.0
+    sse = np.sum(resid ** 2)
     sst = np.sum((y_true - np.mean(y_true)) ** 2)
     r2_cod = 1.0 - (sse / sst) if sst > 0 else 0.0
     pr, _ = pearsonr(y_true, y_pred) if len(y_true) >= 2 else (0.0, 1.0)
-    return {"rmse": rmse, "mae": mae, "r2_cod": r2_cod, "pearson_r2": pr ** 2, "pearson_r": pr}
+    return {
+        "rmse": rmse,
+        "mae": mae,
+        "residual_std": residual_std,
+        "r2_cod": r2_cod,
+        "pearson_r2": pr ** 2,
+        "pearson_r": pr,
+    }
 
 
 def _fit_ridge_cv(X, y):
@@ -56,29 +74,11 @@ def _fit_ridge_cv(X, y):
     return reg
 
 
-def _metrics_list_to_mean_std(rows):
-    """rows: list of metric dicts -> dict of metric -> (mean, std)."""
-    keys = ["rmse", "mae", "r2_cod", "pearson_r2"]
-    out = {}
-    for k in keys:
-        vals = np.array([r[k] for r in rows], dtype=np.float64)
-        out[k] = (float(np.mean(vals)), float(np.std(vals)))
-    return out
-
-
 def _print_metrics_line(prefix, m):
     print(
-        f"  {prefix}  RMSE={m['rmse']:.4f}  MAE={m['mae']:.4f}  "
+        f"  {prefix}  RMSE={m['rmse']:.4f}  SD_resid={m['residual_std']:.4f}  MAE={m['mae']:.4f}  "
         f"R2_COD={m['r2_cod']:.4f}  Pearson_R2={m['pearson_r2']:.4f}"
     )
-
-
-def _print_cv_mean_std(name, ms_std):
-    print(f"\n--- {name} (mean ± std over folds) ---")
-    for k in ["rmse", "mae", "r2_cod", "pearson_r2"]:
-        mu, sd = ms_std[k]
-        label = k.upper() if k != "pearson_r2" else "Pearson_R2"
-        print(f"  {label}: {mu:.4f} ± {sd:.4f}")
 
 
 def _capture_to_numpy(cap):
@@ -170,14 +170,6 @@ def parse_args():
         help="Comma-separated VSA dimensions. Empty string uses --dim once.",
     )
     p.add_argument(
-        "--k_folds",
-        type=int,
-        default=0,
-        help="If >=2, run K-fold CV on training embeddings before the final Ridge fit. "
-        "Default 0: only fit Ridge on full training data (no K-fold block).",
-    )
-    p.add_argument("--seed", type=int, default=42, help="Random seed for KFold shuffle (when --k_folds>=2)")
-    p.add_argument(
         "--gvfa-binding",
         type=str,
         default="circular",
@@ -229,8 +221,7 @@ def run_gvfa_ridge(args, train_data, test_data, device):
         train_HVs = VSA_conversion(train_graphs.copy(), dim, projection_type="orthogonal")
 
         n_train = len(train_HVs)
-        kf_note = "off" if args.k_folds < 2 else str(args.k_folds)
-        print(f"\n{'='*60}\nDim={dim}  |  training graphs: {n_train}  |  K-fold CV: {kf_note}\n{'='*60}")
+        print(f"\n{'='*60}\nDim={dim}  |  training graphs: {n_train}\n{'='*60}")
 
         model_eq1 = GraphCNN(
             test_HVs[0].node_features.shape[1],
@@ -288,27 +279,6 @@ def run_gvfa_ridge(args, train_data, test_data, device):
         train_y = np.asarray(train_labels_t.cpu().numpy().ravel(), dtype=np.float64)
         test_y = np.asarray(test_labels_t.cpu().numpy().ravel(), dtype=np.float64)
 
-        if args.k_folds < 2:
-            print("\n--- K-fold CV: skipped (default: use --k_folds 2 or higher to enable) ---")
-        else:
-            k = min(args.k_folds, n_train)
-            if k < 2:
-                print(
-                    "  Warning: not enough training graphs for K-fold (need at least 2); skipping CV."
-                )
-            else:
-                kf = KFold(n_splits=k, shuffle=True, random_state=args.seed)
-                fold_rows = []
-                for _, (tr_idx, va_idx) in enumerate(kf.split(np.arange(n_train))):
-                    X_tr, X_va = train_emb[tr_idx], train_emb[va_idx]
-                    y_tr, y_va = train_y[tr_idx], train_y[va_idx]
-                    reg_fold = _fit_ridge_cv(X_tr, y_tr)
-                    pred_va = reg_fold.predict(X_va)
-                    fold_rows.append(compute_metrics(y_va, pred_va))
-
-                cv_ms_std = _metrics_list_to_mean_std(fold_rows)
-                _print_cv_mean_std(f"K-fold CV (K={k}) validation", cv_ms_std)
-
         reg_full = _fit_ridge_cv(train_emb, train_y)
         pred_train = reg_full.predict(train_emb)
         pred_test = reg_full.predict(test_emb)
@@ -316,9 +286,9 @@ def run_gvfa_ridge(args, train_data, test_data, device):
         m_train = compute_metrics(train_y, pred_train)
         m_test = compute_metrics(test_y, pred_test)
 
-        print("\n--- Full training set (in-sample, Ridge on all training data) ---")
+        print("\n--- Training set (in-sample, Ridge on all training data) ---")
         _print_metrics_line("", m_train)
-        print("\n--- Independent test set ---")
+        print("\n--- Test set (independent hold-out) ---")
         _print_metrics_line("", m_test)
 
 
