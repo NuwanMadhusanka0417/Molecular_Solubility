@@ -140,6 +140,8 @@ class GraphCNN(nn.Module):
                     pooled = pooled/degree
             
             if(delta ==1):
+                print("h ", h)
+                print("pooled ", pooled)
                 pooled = self.bind(h,pooled)+h #self.bind(h,pooled) +  h   #pooled + h  #self.bind(h,pooled) + #
             elif(delta ==2):
                 pooled = self.bind(h,pooled)+h+pooled #self.bind(h,pooled) +  h   #pooled + h  #self.bind(h,pooled) + #

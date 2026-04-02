@@ -8,3 +8,9 @@ qsub -I  -l walltime=30:00:00,mem=100GB,ncpus=28,jobfs=50GB -P mi23 -l storage=g
 cd /g/data/jq77/nuwan/Molecular_Solubility/GVFA/
 
 python3 GVFA_with_traditional.py --hv_dim 2100
+
+
+CUDA_VISIBLE_DEVICES=  python GVFA_edge_main.py --model gvfa_ridge --export_analysis_dir best1_hv_analysis
+
+
+ssh -o "ServerAliveInterval 60" -o "ServerAliveCountMax 6" cdac@10.142.44.26

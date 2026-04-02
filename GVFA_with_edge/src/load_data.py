@@ -55,7 +55,7 @@ class ZINCLikeCSV(InMemoryDataset):
                 graphs.append(g)
         self.data, self.slices = self.collate(graphs)
 
-def load_data(dataset="old", train_path=None, test_path=None, smiles_col=None, target_col=None):
+def load_data(dataset="old", train_path=None, test_path=None, smiles_col=None, target_col=None, seed=42):
   """
   Load train/test data with a choice of dataset source.
 
@@ -73,6 +73,8 @@ def load_data(dataset="old", train_path=None, test_path=None, smiles_col=None, t
       For dataset="new": column name for SMILES. Default: "smiles_canon".
   target_col : str, optional
       For dataset="new": column name for target. Default: "LogS".
+  seed : int, optional
+      For dataset="old": random_state for the 90/10 train/test split.
 
   Returns
   -------
@@ -83,7 +85,7 @@ def load_data(dataset="old", train_path=None, test_path=None, smiles_col=None, t
     df = pd.read_csv("final_data/solubility_1.csv")
     df = df.dropna(subset=["SMILES", "logS"])
     train_df, test_df = train_test_split(
-        df, test_size=0.1, random_state=42, shuffle=True
+        df, test_size=0.1, random_state=seed, shuffle=True
     )
     dataset_train = ZINCLikeCSV(train_df, smiles_col="SMILES", target_col="logS")
     dataset_test  = ZINCLikeCSV(test_df,  smiles_col="SMILES", target_col="logS")

@@ -8,7 +8,7 @@ sys.path.append("models/")
 from models.mlp import MLP
 
 class GraphCNN(nn.Module):
-    def __init__(self, input_dim, num_layers, delta, graph_pooling_type, neighbor_pooling_type, device, equation, edge_feat_dim=5, edge_projection_type="orthogonal", use_reservoir=False, reservoir_iters=7, reservoir_alpha=0.8, reservoir_polynomial_order=2, reservoir_history_weight=0.75, use_resonator=False, resonator_iters=7, resonator_beta=0.75, hop_decay=0.85, sigma_pi_orders=None):
+    def __init__(self, input_dim, num_layers, delta, graph_pooling_type, neighbor_pooling_type, device, equation, edge_feat_dim=5, edge_projection_type="orthogonal", use_reservoir=False, reservoir_iters=7, reservoir_alpha=0.8, reservoir_polynomial_order=2, reservoir_history_weight=0.75, use_resonator=False, resonator_iters=7, resonator_beta=0.75, hop_decay=0.85, sigma_pi_orders=None, rng_seed=0):
         '''
             use_reservoir: VSA-RC (VSA Reservoir Computing): tap buffer + Sigma-Pi polynomial expansion
             reservoir_iters, reservoir_alpha, reservoir_history_weight: unused (kept for compat)
@@ -40,7 +40,7 @@ class GraphCNN(nn.Module):
         self.sigma_pi_orders = sigma_pi_orders if sigma_pi_orders is not None else [0, 1]
 
         if self.edge_feat_dim > 0:
-            g = torch.Generator().manual_seed(0)
+            g = torch.Generator().manual_seed(rng_seed)
             W_edge = torch.randn(self.edge_feat_dim, input_dim, generator=g)
             if edge_projection_type == "orthogonal" and input_dim >= self.edge_feat_dim:
                 # Orthonormal columns: preserves norms of projected edge vectors (info-preserving)
@@ -335,7 +335,6 @@ class GraphCNN(nn.Module):
     def next_layer_eps(self, h, layer, padded_neighbor_list=None, Adj_block=None, delta=1, equation=10,
                        edge_index=None, edge_H=None, num_nodes=None, return_pre_sign=False):
         shift = 1
-        torch.manual_seed(0)
 
         if equation == 10:
             rotated = torch.roll(h.clone(), shifts=shift, dims=1)
