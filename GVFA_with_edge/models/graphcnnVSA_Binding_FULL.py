@@ -340,11 +340,19 @@ class GraphCNN(nn.Module):
             rotated = torch.roll(h.clone(), shifts=shift, dims=1)
             pooled = self._pool_neighbors(rotated, Adj_block, padded_neighbor_list, edge_index, edge_H, num_nodes)
             if delta == 1:
+
+                # print("h ", h)
+                # print("pooled ", pooled)
                 pooled = self.bind(h, pooled) + h
+                # print("pooled after bind ", pooled)
+                
             elif delta == 2:
+
                 pooled = self.bind(h, pooled) + h + pooled
             else:
+
                 pooled = pooled + h
+
 
         elif equation == 11:
             pooled = self._pool_neighbors(h, Adj_block, padded_neighbor_list, edge_index, edge_H, num_nodes)
@@ -356,6 +364,7 @@ class GraphCNN(nn.Module):
                 pooled = pooled + h
             pooled = torch.roll(pooled, shifts=shift, dims=1)
 
+
         else:
             rotated = torch.roll(h.clone(), shifts=shift, dims=1)
             pooled = self._pool_neighbors(rotated, Adj_block, padded_neighbor_list, edge_index, edge_H, num_nodes)
@@ -366,8 +375,10 @@ class GraphCNN(nn.Module):
             else:
                 pooled = pooled + h
             pooled = torch.roll(pooled, shifts=shift, dims=1)
+            
 
         pre_bin = pooled
+        # print(pooled)
         pooled = torch.sign(pooled)
         if return_pre_sign:
             return pooled, pre_bin

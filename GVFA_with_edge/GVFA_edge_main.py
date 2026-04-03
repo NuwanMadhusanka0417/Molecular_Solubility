@@ -100,6 +100,13 @@ def parse_args():
     p.add_argument('--no_ridge', action='store_false', dest='use_ridge')
     p.add_argument('--seed', type=int, default=42, help='RNG seed (PyTorch, NumPy, Python, VSA/edge init, XGB; train/test split when dataset=old)')
     p.add_argument(
+        '--sigma_pi',
+        type=str,
+        default='all',
+        help='Sigma-Pi order sets per --dims value. Presets: "all" = [0],[1],[2],[0,1],[0,1,2]; '
+             '"legacy" = [0,1] only. Or one set as comma-separated orders, e.g. "0,1,2".',
+    )
+    p.add_argument(
         '--export_analysis_dir', type=str, default=None,
         help='If set, save per-batch .npz files: GVFA layer pre/post binarization HV, '
              'sigma-pi per order + combined, F1 tap buffer, y (logS), and node graph ids.',
@@ -111,9 +118,31 @@ def parse_args():
 # GVFA + Ridge/XGBoost
 # ---------------------------------------------------------------------------
 
+def _parse_sigma_pi_arg(s: str):
+    """Return list of (sigma_pi_orders, tag) for the ridge loop."""
+    key = s.strip().lower()
+    if key == 'all':
+        return [
+            ([0], 'o0'),
+            ([1], 'o1'),
+            ([2], 'o2'),
+            ([0, 1], 'o0_o1'),
+            ([0, 1, 2], 'o0_o1_o2'),
+        ]
+    if key == 'legacy':
+        return [([0, 1], 'o0_o1')]
+    orders = [int(x.strip()) for x in s.split(',') if x.strip() != '']
+    if not orders:
+        raise ValueError(f'Invalid --sigma_pi: {s!r}')
+    tag = 'o' + '_o'.join(str(t) for t in orders)
+    return [(orders, tag)]
+
+
 def run_gvfa_ridge(args, train_data, test_data, device):
     seed = args.seed
     dims = [int(x) for x in args.dims.split(',')]
+    sigma_configs = _parse_sigma_pi_arg(args.sigma_pi)
+
     for dim in dims:
         random.seed(seed)
         np.random.seed(seed)
@@ -130,43 +159,58 @@ def run_gvfa_ridge(args, train_data, test_data, device):
             train_graphs.copy(), dim, projection_type="orthogonal", seed=seed,
         )
 
-        model_eq1 = GraphCNN(
-            test_HVs[0].node_features.shape[1], 5, 1, 'sum', 'sum', device, 10,
-            edge_feat_dim=5, edge_projection_type="orthogonal",
-            use_reservoir=True, hop_decay=0.85, sigma_pi_orders=[0, 1],
-            rng_seed=seed,
-        )
-        train_emb, train_labels = getEmbedding(model_eq1, device, train_HVs, use_size_aware=True, hop_alpha=1.0)
-        test_emb, test_labels = getEmbedding(model_eq1, device, test_HVs, use_size_aware=True, hop_alpha=1.0)
-        train_emb = train_emb.squeeze(0)
-        test_emb = test_emb.squeeze(0)
+        for sigma_pi_orders, sigma_tag in sigma_configs:
+            torch.manual_seed(seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(seed)
 
-        if args.use_ridge:
-            reg = RidgeCV(alphas=np.logspace(-4, 2, 50), cv=5, scoring='neg_mean_squared_error')
-            reg.fit(train_emb, train_labels)
-            pred = reg.predict(test_emb)
-        else:
-            from xgboost import XGBRegressor
-            reg = XGBRegressor(
-                n_estimators=2000, learning_rate=0.03, max_depth=7,
-                subsample=0.8, colsample_bytree=0.8, reg_lambda=1.0, reg_alpha=0.0,
-                random_state=seed, n_jobs=4, tree_method="hist",
+            model_eq1 = GraphCNN(
+                test_HVs[0].node_features.shape[1], 5, 1, 'sum', 'sum', device, 10,
+                edge_feat_dim=5, edge_projection_type="orthogonal",
+                use_reservoir=True, hop_decay=0.85, sigma_pi_orders=sigma_pi_orders,
+                rng_seed=seed,
             )
-            reg.fit(train_emb, train_labels, eval_set=[(test_emb, test_labels)], verbose=False)
-            pred = reg.predict(test_emb)
+            train_emb, train_labels = getEmbedding(
+                model_eq1, device, train_HVs, use_size_aware=True, hop_alpha=1.0,
+            )
+            test_emb, test_labels = getEmbedding(
+                model_eq1, device, test_HVs, use_size_aware=True, hop_alpha=1.0,
+            )
+            train_emb = train_emb.squeeze(0)
+            test_emb = test_emb.squeeze(0)
 
-        m = compute_metrics(test_labels, pred)
-        print(f"Dim={dim}  RMSE={m['rmse']:.4f}  STD_err={m['std_err']:.4f}  MAE={m['mae']:.4f}  "
-              f"R2_COD={m['r2_cod']:.4f}  Pearson_R2={m['pearson_r2']:.4f}")
-        if args.export_analysis_dir:
-            sub = os.path.join(args.export_analysis_dir, f"ridge_dim_{dim}")
-            export_hypervector_analysis(
-                model_eq1, train_graphs, device, sub, "train", args.batch_size,
+            if args.use_ridge:
+                reg = RidgeCV(alphas=np.logspace(-4, 2, 50), cv=5, scoring='neg_mean_squared_error')
+                reg.fit(train_emb, train_labels)
+                pred = reg.predict(test_emb)
+            else:
+                from xgboost import XGBRegressor
+                reg = XGBRegressor(
+                    n_estimators=2000, learning_rate=0.03, max_depth=7,
+                    subsample=0.8, colsample_bytree=0.8, reg_lambda=1.0, reg_alpha=0.0,
+                    random_state=seed, n_jobs=4, tree_method="hist",
+                )
+                reg.fit(train_emb, train_labels, eval_set=[(test_emb, test_labels)], verbose=False)
+                pred = reg.predict(test_emb)
+
+            m = compute_metrics(test_labels, pred)
+            orders_str = ','.join(str(x) for x in sigma_pi_orders)
+            print(
+                f"Dim={dim}  sigma_pi=[{orders_str}]  ({sigma_tag})  "
+                f"RMSE={m['rmse']:.4f}  STD_err={m['std_err']:.4f}  MAE={m['mae']:.4f}  "
+                f"R2_COD={m['r2_cod']:.4f}  Pearson_R2={m['pearson_r2']:.4f}",
             )
-            export_hypervector_analysis(
-                model_eq1, test_graphs, device, sub, "test", args.batch_size,
-            )
-            print(f"  Saved HV analysis under {sub}")
+            if args.export_analysis_dir:
+                sub = os.path.join(
+                    args.export_analysis_dir, f"ridge_dim_{dim}_sigma_{sigma_tag}",
+                )
+                export_hypervector_analysis(
+                    model_eq1, train_graphs, device, sub, "train", args.batch_size,
+                )
+                export_hypervector_analysis(
+                    model_eq1, test_graphs, device, sub, "test", args.batch_size,
+                )
+                print(f"  Saved HV analysis under {sub}")
 
 
 # ---------------------------------------------------------------------------

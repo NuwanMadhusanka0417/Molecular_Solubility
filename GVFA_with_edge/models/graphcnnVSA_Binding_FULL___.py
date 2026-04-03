@@ -191,6 +191,7 @@ class GraphCNN(nn.Module):
 
 
         # pooled = F.normalize(pooled, p=2, dim=1)
+        print(pooled)
         pooled = torch.sign(pooled)
         # pooled = 2*torch.sigmoid(pooled)-1
 
