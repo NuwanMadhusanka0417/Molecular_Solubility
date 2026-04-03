@@ -160,7 +160,7 @@ class GraphCNN(nn.Module):
         matrix[torch.arange(n), perm] = 1
         return matrix
     
-    def bind(self, x, y):
+    def bind(self, x, y, eps=1e-8):
         # Perform FFT on each hypervector in the tensors
         fft_self = fft(x, dim=1)
         fft_other = fft(y, dim=1)
@@ -171,8 +171,9 @@ class GraphCNN(nn.Module):
         # Perform inverse FFT to get back to the spatial domain
         result = ifft(product, dim=1)
 
-        # Return the real part of the result as the final bound hypervectors
-        return torch.real(result)
+        # Real part, then L2-normalize per row (standard VSA practice after binding)
+        result = torch.real(result)
+        return F.normalize(result, p=2, dim=1, eps=eps)
 
     def permute_hv(self, x, shift=1):
         """Cyclic permutation to encode structural/temporal relationships (P_bef in Gayler 2023)."""
