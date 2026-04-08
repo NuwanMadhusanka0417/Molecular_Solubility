@@ -47,6 +47,7 @@ class GraphCNN(nn.Module):
         self.resonator_beta = resonator_beta
         self.hop_decay = hop_decay if use_reservoir else 1.0
         self.sigma_pi_orders = sigma_pi_orders if sigma_pi_orders is not None else [0, 1]
+        self.rng_seed = rng_seed
 
         if self.edge_feat_dim > 0:
             W_edge = random_phase_matrix(self.edge_feat_dim, input_dim, seed=rng_seed)
@@ -414,7 +415,7 @@ class GraphCNN(nn.Module):
 
         X_concat = torch.cat([g.node_features for g in batch_graph], 0).to(self.device)
         if not X_concat.is_complex():
-            X_concat = promote_real_to_fhrr(X_concat)
+            X_concat = promote_real_to_fhrr(X_concat, seed=self.rng_seed)
         graph_pool = self.__preprocess_graphpool(batch_graph)
         Adj_block = self.__preprocess_neighbors_sumavepool(batch_graph)
 

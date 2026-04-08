@@ -14,3 +14,16 @@ CUDA_VISIBLE_DEVICES=  python GVFA_edge_main.py --model gvfa_ridge --export_anal
 
 
 ssh -o "ServerAliveInterval 60" -o "ServerAliveCountMax 6" cdac@10.142.44.26
+
+module load python3/3.8.5
+
+
+python GVFA_edge_main.py --seeds 42,43,44,45,46 --dims "1000,2000,5000,10000" --sigma_pi all
+
+python GVFA_edge_main.py --seeds 42,43,44,45,46 --dims "1000,2000,5000" --sigma_pi "0,1,2"
+
+python GVFA_edge_main.py --seeds 42,43 --dims "1000" --sigma_pi "0,1"
+
+python GVFA_edge_main.py --seed 42 --dims "1000,2000" --sigma_pi legacy
+
+python GVFA_edge_main.py --seeds 42,43,44 --dims "1000,2000" --sigma_pi all --save_csv
