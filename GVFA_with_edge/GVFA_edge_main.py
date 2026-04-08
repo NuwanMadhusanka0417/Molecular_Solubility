@@ -108,8 +108,8 @@ def parse_args():
              '"legacy" = [0,1] only. Or one set as comma-separated orders, e.g. "0,1,2".',
     )
     p.add_argument(
-        '--results_dir', type=str, default='results',
-        help='Directory to save CSV files: summary metrics and per-molecule predictions.',
+        '--save_results', type=str, default=None,
+        help='If set, save CSV files (summary + per-molecule predictions) to this directory.',
     )
     p.add_argument(
         '--export_analysis_dir', type=str, default=None,
@@ -148,14 +148,16 @@ def run_gvfa_ridge(args, train_data, test_data, device):
     dims = [int(x) for x in args.dims.split(',')]
     sigma_configs = _parse_sigma_pi_arg(args.sigma_pi)
 
-    os.makedirs(args.results_dir, exist_ok=True)
-    summary_path = os.path.join(args.results_dir, 'results_summary.csv')
-    summary_fields = [
-        'dim', 'sigma_pi', 'sigma_tag', 'seed',
-        'RMSE', 'STD_err', 'MAE', 'R2_COD', 'Pearson_R2', 'Pearson_R',
-    ]
-    with open(summary_path, 'w', newline='') as f:
-        csv.DictWriter(f, fieldnames=summary_fields).writeheader()
+    save = args.save_results is not None
+    if save:
+        os.makedirs(args.save_results, exist_ok=True)
+        summary_path = os.path.join(args.save_results, 'results_summary.csv')
+        summary_fields = [
+            'dim', 'sigma_pi', 'sigma_tag', 'seed',
+            'RMSE', 'STD_err', 'MAE', 'R2_COD', 'Pearson_R2', 'Pearson_R',
+        ]
+        with open(summary_path, 'w', newline='') as f:
+            csv.DictWriter(f, fieldnames=summary_fields).writeheader()
 
     for dim in dims:
         random.seed(seed)
@@ -215,33 +217,32 @@ def run_gvfa_ridge(args, train_data, test_data, device):
                 f"R2_COD={m['r2_cod']:.4f}  Pearson_R2={m['pearson_r2']:.4f}",
             )
 
-            # --- Save per-molecule predictions CSV ---
-            y_true = np.asarray(test_labels).ravel()
-            y_pred = np.asarray(pred).ravel()
-            pred_path = os.path.join(
-                args.results_dir, f'predictions_dim{dim}_{sigma_tag}.csv',
-            )
-            with open(pred_path, 'w', newline='') as f:
-                w = csv.writer(f)
-                w.writerow(['y_true', 'y_pred', 'error'])
-                for yt, yp in zip(y_true, y_pred):
-                    w.writerow([f'{yt:.6f}', f'{yp:.6f}', f'{yt - yp:.6f}'])
+            if save:
+                y_true = np.asarray(test_labels).ravel()
+                y_pred = np.asarray(pred).ravel()
+                pred_path = os.path.join(
+                    args.save_results, f'predictions_dim{dim}_{sigma_tag}.csv',
+                )
+                with open(pred_path, 'w', newline='') as f:
+                    w = csv.writer(f)
+                    w.writerow(['y_true', 'y_pred', 'error'])
+                    for yt, yp in zip(y_true, y_pred):
+                        w.writerow([f'{yt:.6f}', f'{yp:.6f}', f'{yt - yp:.6f}'])
 
-            # --- Append summary row ---
-            with open(summary_path, 'a', newline='') as f:
-                csv.DictWriter(f, fieldnames=summary_fields).writerow({
-                    'dim': dim,
-                    'sigma_pi': f'[{orders_str}]',
-                    'sigma_tag': sigma_tag,
-                    'seed': seed,
-                    'RMSE': f'{m["rmse"]:.6f}',
-                    'STD_err': f'{m["std_err"]:.6f}',
-                    'MAE': f'{m["mae"]:.6f}',
-                    'R2_COD': f'{m["r2_cod"]:.6f}',
-                    'Pearson_R2': f'{m["pearson_r2"]:.6f}',
-                    'Pearson_R': f'{m["pearson_r"]:.6f}',
-                })
-            print(f"  Saved predictions to {pred_path}")
+                with open(summary_path, 'a', newline='') as f:
+                    csv.DictWriter(f, fieldnames=summary_fields).writerow({
+                        'dim': dim,
+                        'sigma_pi': f'[{orders_str}]',
+                        'sigma_tag': sigma_tag,
+                        'seed': seed,
+                        'RMSE': f'{m["rmse"]:.6f}',
+                        'STD_err': f'{m["std_err"]:.6f}',
+                        'MAE': f'{m["mae"]:.6f}',
+                        'R2_COD': f'{m["r2_cod"]:.6f}',
+                        'Pearson_R2': f'{m["pearson_r2"]:.6f}',
+                        'Pearson_R': f'{m["pearson_r"]:.6f}',
+                    })
+                print(f"  Saved predictions to {pred_path}")
 
             if args.export_analysis_dir:
                 sub = os.path.join(
