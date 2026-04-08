@@ -275,7 +275,7 @@ class GVFAWithAttention(nn.Module):
         Returns: pred [B, 1]. If return_attention_weights, also (attn_weights [B, num_layers], embedding [B, D]).
         """
         with torch.no_grad():
-            # H_stack: [num_layers, B, feature_dim]
+            # H_stack: [num_layers, B, 2*D] (FHRR real/imag interleaved)
             H_stack = self.encoder(batch_graph)
 
         num_layers, B, D = H_stack.shape
@@ -381,9 +381,11 @@ def train_gvfa_attention(
         edge_feat_dim=0,
         use_reservoir=False,
     )
+    # FHRR encoder output is real/imag interleaved -> 2 * hypervector dim
+    encoder_out_dim = feature_dim * 2
     model = GVFAWithAttention(
         encoder,
-        feature_dim=feature_dim,
+        feature_dim=encoder_out_dim,
         regressor_hidden=regressor_hidden,
         dropout=dropout,
     ).to(device)

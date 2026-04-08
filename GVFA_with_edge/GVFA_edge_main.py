@@ -1,6 +1,9 @@
 """
 GVFA for molecular solubility prediction.
 
+Encoder uses FHRR (complex phasors, element-wise bind); graph embeddings are real with
+real/imag interleaved (2x hypervector dimension per complex block).
+
 GVFA encoder -> embeddings -> Ridge/XGBoost (no training).
 
 Train: solubility_1.csv.  Test: testset_novel.csv.
@@ -25,6 +28,14 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _tensor_to_np_analysis(t):
+    """FHRR tensors may be complex; preserve complex64 in .npz exports."""
+    x = t.detach().cpu().numpy()
+    if x.dtype.kind == "c":
+        return x.astype(np.complex64)
+    return x.astype(np.float32)
+
 
 def compute_metrics(y_true, y_pred):
     """RMSE, MAE, std of residuals, R² (COD), Pearson R² — all on same arrays in original logS units."""
@@ -68,16 +79,16 @@ def export_hypervector_analysis(encoder, graphs, device, out_dir, split_name, ba
         if aux.get("batch_node_graph_id") is not None:
             payload["batch_node_graph_id"] = aux["batch_node_graph_id"].numpy()
         for li, t in enumerate(aux["layer_pre_bin"]):
-            payload[f"layer_{li}_pre_bin"] = t.cpu().numpy().astype(np.float32)
+            payload[f"layer_{li}_pre_bin"] = _tensor_to_np_analysis(t)
         for li, t in enumerate(aux["layer_post_bin"]):
-            payload[f"layer_{li}_post_bin"] = t.cpu().numpy().astype(np.float32)
+            payload[f"layer_{li}_post_bin"] = _tensor_to_np_analysis(t)
         if aux.get("F1_tap") is not None:
-            payload["F1_tap"] = aux["F1_tap"].cpu().numpy().astype(np.float32)
+            payload["F1_tap"] = _tensor_to_np_analysis(aux["F1_tap"])
         if aux.get("sigma_pi_terms") is not None:
             for order, ten in aux["sigma_pi_terms"].items():
-                payload[f"sigma_pi_order_{order}"] = ten.cpu().numpy().astype(np.float32)
+                payload[f"sigma_pi_order_{order}"] = _tensor_to_np_analysis(ten)
         if aux.get("sigma_pi_combined") is not None:
-            payload["sigma_pi_combined"] = aux["sigma_pi_combined"].cpu().numpy().astype(np.float32)
+            payload["sigma_pi_combined"] = _tensor_to_np_analysis(aux["sigma_pi_combined"])
         path = os.path.join(out_dir, f"{split_name}_batch_{batch_ix:05d}.npz")
         np.savez_compressed(path, **payload)
         batch_ix += 1
@@ -92,7 +103,7 @@ def parse_args():
     p.add_argument('--dataset', type=str, default='solubility_novel',
                    choices=['old', 'solubility_novel', 'new'],
                    help='solubility_novel: train solubility_1.csv, test testset_novel.csv')
-    p.add_argument('--dim', type=int, default=1000, help='VSA dimension')
+    p.add_argument('--dim', type=int, default=1000, help='FHRR hypervector dimension D (embeddings use 2*D real/imag per block)')
     p.add_argument('--dims', type=str, default='1000, 2000, 5000, 10000',
                    help='Comma-separated dims for gvfa_ridge loop')
     p.add_argument('--batch_size', type=int, default=64)
@@ -108,7 +119,7 @@ def parse_args():
     )
     p.add_argument(
         '--export_analysis_dir', type=str, default=None,
-        help='If set, save per-batch .npz files: GVFA layer pre/post binarization HV, '
+        help='If set, save per-batch .npz files: GVFA layer pre/post FHRR torus HV, '
              'sigma-pi per order + combined, F1 tap buffer, y (logS), and node graph ids.',
     )
     return p.parse_args()

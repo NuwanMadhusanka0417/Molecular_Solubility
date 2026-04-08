@@ -1,15 +1,24 @@
+import os
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from torch.fft import fft, ifft
 import math
 import sys
+
 sys.path.append("models/")
-from models.mlp import MLP
+_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _root not in sys.path:
+    sys.path.insert(0, _root)
+from src.fhrr_ops import (
+    fhrr_bind, fhrr_to_torus, promote_real_to_fhrr,
+    complex_to_real_stacked, complex_spmm, random_phase_matrix,
+)
 
 class GraphCNN(nn.Module):
     def __init__(self, input_dim, num_layers, delta, graph_pooling_type, neighbor_pooling_type, device, equation, edge_feat_dim=5, edge_projection_type="orthogonal", use_reservoir=False, reservoir_iters=7, reservoir_alpha=0.8, reservoir_polynomial_order=2, reservoir_history_weight=0.75, use_resonator=False, resonator_iters=7, resonator_beta=0.75, hop_decay=0.85, sigma_pi_orders=None, rng_seed=0):
         '''
+            FHRR: complex hypervectors on the unit torus; binding = element-wise complex multiply.
+            Forward outputs real tensors with real/imag interleaved (2x D) for readouts / sklearn.
+
             use_reservoir: VSA-RC (VSA Reservoir Computing): tap buffer + Sigma-Pi polynomial expansion
             reservoir_iters, reservoir_alpha, reservoir_history_weight: unused (kept for compat)
             reservoir_polynomial_order: unused, use sigma_pi_orders instead
@@ -40,15 +49,7 @@ class GraphCNN(nn.Module):
         self.sigma_pi_orders = sigma_pi_orders if sigma_pi_orders is not None else [0, 1]
 
         if self.edge_feat_dim > 0:
-            g = torch.Generator().manual_seed(rng_seed)
-            W_edge = torch.randn(self.edge_feat_dim, input_dim, generator=g)
-            if edge_projection_type == "orthogonal" and input_dim >= self.edge_feat_dim:
-                # Orthonormal columns: preserves norms of projected edge vectors (info-preserving)
-                A = torch.randn(input_dim, self.edge_feat_dim, generator=g)
-                Q, _ = torch.linalg.qr(A)
-                W_edge = Q[:, :self.edge_feat_dim].T  # (edge_feat_dim, input_dim)
-            else:
-                W_edge = W_edge / math.sqrt(self.edge_feat_dim)
+            W_edge = random_phase_matrix(self.edge_feat_dim, input_dim, seed=rng_seed)
             self.register_buffer("W_edge", W_edge)
 
     def __preprocess_neighbors_sumavepool(self, batch_graph):
@@ -139,19 +140,27 @@ class GraphCNN(nn.Module):
         pooled = torch.zeros(num_nodes, D, device=h_to_pool.device, dtype=h_to_pool.dtype)
         pooled.index_add_(0, dst, messages)
         if average:
-            degree = torch.zeros(num_nodes, 1, device=h_to_pool.device, dtype=h_to_pool.dtype)
-            degree.index_add_(0, dst.unsqueeze(1), torch.ones(E, 1, device=h_to_pool.device, dtype=h_to_pool.dtype))
-            degree = degree.clamp(min=1.0)
+            degree = torch.zeros(num_nodes, device=h_to_pool.device, dtype=torch.float32)
+            degree.index_add_(0, dst, torch.ones(E, device=h_to_pool.device, dtype=torch.float32))
+            degree = degree.clamp(min=1.0).unsqueeze(1)
             pooled = pooled / degree
         return pooled
 
     def maxpool(self, h, padded_neighbor_list):
-        ###Element-wise minimum will never affect max-pooling
-
-        dummy = torch.min(h, dim = 0)[0]
-        h_with_dummy = torch.cat([h, dummy.reshape((1, -1)).to(self.device)])
-        pooled_rep = torch.max(h_with_dummy[padded_neighbor_list], dim = 1)[0]
-        return pooled_rep
+        """Per-dimension max over neighbors; for FHRR select the neighbor with largest |z| per dim."""
+        if h.is_complex():
+            dummy = torch.zeros(1, h.shape[1], dtype=h.dtype, device=self.device)
+            h_with_dummy = torch.cat([h, dummy], dim=0)
+            neighbors = h_with_dummy[padded_neighbor_list]  # [N, max_deg, D]
+            mag = neighbors.abs()
+            idx = mag.argmax(dim=1)  # [N, D]
+            N, D = idx.shape
+            n_idx = torch.arange(N, device=h.device).unsqueeze(1).expand_as(idx)
+            d_idx = torch.arange(D, device=h.device).unsqueeze(0).expand_as(idx)
+            return neighbors[n_idx, idx, d_idx]
+        dummy = torch.min(h, dim=0)[0].reshape((1, -1)).to(self.device)
+        h_with_dummy = torch.cat([h, dummy], dim=0)
+        return torch.max(h_with_dummy[padded_neighbor_list], dim=1)[0]
     
     def permutation_to_matrix(self, perm):
         """Converts a permutation vector to its corresponding permutation matrix."""
@@ -161,29 +170,17 @@ class GraphCNN(nn.Module):
         return matrix
     
     def bind(self, x, y, eps=1e-8):
-        # Perform FFT on each hypervector in the tensors
-        fft_self = fft(x, dim=1)
-        fft_other = fft(y, dim=1)
-
-        # Multiply element-wise in the frequency domain
-        product = torch.mul(fft_self, fft_other)
-
-        # Perform inverse FFT to get back to the spatial domain
-        result = ifft(product, dim=1)
-
-        # Real part, then L2-normalize per row (standard VSA practice after binding)
-        result = torch.real(result)
-        return F.normalize(result, p=2, dim=1, eps=eps)
+        """FHRR binding: element-wise complex multiplication (phasor product)."""
+        return fhrr_bind(x, y, eps=eps)
 
     def permute_hv(self, x, shift=1):
         """Cyclic permutation to encode structural/temporal relationships (P_bef in Gayler 2023)."""
         return torch.roll(x, shifts=shift, dims=1)
 
     def weighted_bundle(self, x, y, weight_x, weight_y, eps=1e-8):
-        """Weighted VSA bundling with L2 normalization for feature fading control."""
+        """Weighted FHRR bundling: superposition then torus projection."""
         result = weight_x * x + weight_y * y
-        norm = result.norm(p=2, dim=1, keepdim=True).clamp(min=eps)
-        return result / norm
+        return fhrr_to_torus(result, eps=eps)
 
     def reservoir_message_passing(self, node_H, edge_H, edge_index, eps=1e-8):
         """VSA message passing: bind neighbor states with edge features, aggregate at dst."""
@@ -192,8 +189,7 @@ class GraphCNN(nn.Module):
         messages = self.bind(neighbor_h, edge_H)
         aggregated = torch.zeros_like(node_H)
         aggregated.index_add_(0, dst, self.reservoir_alpha * messages)
-        norm = aggregated.norm(p=2, dim=1, keepdim=True).clamp(min=eps)
-        return aggregated / norm
+        return fhrr_to_torus(aggregated, eps=eps)
 
     def _rho_k(self, x, k):
         """Hop-specific permutation (rho^k): cyclic roll by k positions."""
@@ -214,7 +210,7 @@ class GraphCNN(nn.Module):
             weight = self.hop_decay ** k
             permuted = self._rho_k(h_k, k)
             F1 = F1 + weight * permuted
-        return F.normalize(F1, p=2, dim=1, eps=eps)
+        return fhrr_to_torus(F1, eps=eps)
 
     def sigma_pi_expansion_and_terms(self, F1, eps=1e-8):
         """
@@ -230,11 +226,11 @@ class GraphCNN(nn.Module):
                 ast_t = F1
             else:
                 ast_t = self.bind(self._pi(ast_prev, shift=max(1, D // 3)), F1)
-                ast_t = F.normalize(ast_t, p=2, dim=1, eps=eps)
+                ast_t = fhrr_to_torus(ast_t, eps=eps)
             ast_prev = ast_t
             result = result + ast_t
             terms[t] = ast_t.clone()
-        F_v = F.normalize(result, p=2, dim=1, eps=eps)
+        F_v = fhrr_to_torus(result, eps=eps)
         return F_v, terms
 
     def sigma_pi_expansion(self, F1, eps=1e-8):
@@ -252,13 +248,13 @@ class GraphCNN(nn.Module):
         """
         num_graphs = graph_pool.shape[0]
         D = F_v.shape[1]
-        g_mean = torch.spmm(graph_pool, F_v)
+        g_mean = complex_spmm(graph_pool, F_v)
         g_max = self._segment_max(F_v, graph_pool, start_idx, num_graphs)
         F_sq = self.bind(F_v, F_v)
-        g_mean_sq = torch.spmm(graph_pool, F_sq)
+        g_mean_sq = complex_spmm(graph_pool, F_sq)
         num_nodes = torch.tensor(
             [start_idx[i + 1] - start_idx[i] for i in range(num_graphs)],
-            dtype=F_v.dtype, device=F_v.device
+            dtype=torch.float32, device=F_v.device,
         ).view(-1, 1).clamp(min=1)
         if self.graph_pooling_type == "sum":
             g_mean = g_mean / num_nodes
@@ -267,14 +263,22 @@ class GraphCNN(nn.Module):
         return g
 
     def _segment_max(self, x, graph_pool, start_idx, num_graphs):
-        """Compute max over nodes per graph. x: [total_nodes, D]."""
-        total_nodes = x.shape[0]
+        """Compute max over nodes per graph (per-dimension argmax |z| for FHRR). x: [total_nodes, D]."""
         D = x.shape[1]
-        out = torch.full((num_graphs, D), float('-inf'), device=x.device, dtype=x.dtype)
+        device = x.device
+        dtype = x.dtype
+        out = torch.zeros(num_graphs, D, device=device, dtype=dtype)
         for i in range(num_graphs):
             lo, hi = start_idx[i], start_idx[i + 1]
             if hi > lo:
-                out[i] = x[lo:hi].max(dim=0)[0]
+                chunk = x[lo:hi]
+                if chunk.is_complex():
+                    mag = chunk.abs()
+                    idx = mag.argmax(dim=0)
+                    d_idx = torch.arange(D, device=device)
+                    out[i] = chunk[idx, d_idx]
+                else:
+                    out[i] = chunk.max(dim=0)[0]
         return out
 
     def reservoir_update(self, node_H, edge_H, edge_index):
@@ -294,7 +298,7 @@ class GraphCNN(nn.Module):
                 x_state = (w_msg / total) * messages + (w_state / total) * x_permuted + (w_interaction / total) * interaction
             else:
                 x_state = self.weighted_bundle(x_permuted, messages, self.reservoir_history_weight, 1 - self.reservoir_history_weight)
-            x_state = F.normalize(x_state, p=2, dim=1)
+            x_state = fhrr_to_torus(x_state)
         return x_state
 
     def resonator_consensus(self, node_H, edge_H, edge_index, iterations=7, beta=0.75):
@@ -307,11 +311,9 @@ class GraphCNN(nn.Module):
             neighbor_h = current[src]
             msg = self.bind(edge_H, neighbor_h)
             messages.index_add_(0, dst, msg)
-            msg_norm = messages.norm(p=2, dim=1, keepdim=True).clamp(min=1e-8)
-            messages = messages / msg_norm
+            messages = fhrr_to_torus(messages)
             current = beta * current + (1 - beta) * messages
-            curr_norm = current.norm(p=2, dim=1, keepdim=True).clamp(min=1e-8)
-            current = current / curr_norm
+            current = fhrr_to_torus(current)
         return current
     def invert_permutation(self, perm):
         """Generate the inverse of a permutation."""
@@ -327,9 +329,12 @@ class GraphCNN(nn.Module):
             return self._edge_message_pool(h_pool, edge_index, edge_H, num_nodes, average=avg)
         if self.neighbor_pooling_type == "max":
             return self.maxpool(h_pool, padded_neighbor_list)
-        pooled = torch.spmm(Adj_block, h_pool)
+        pooled = complex_spmm(Adj_block, h_pool)
         if avg:
-            degree = torch.spmm(Adj_block, torch.ones((Adj_block.shape[0], 1)).to(self.device))
+            degree = torch.sparse.mm(
+                Adj_block,
+                torch.ones((Adj_block.shape[0], 1), device=self.device, dtype=torch.float32),
+            )
             pooled = pooled / degree
         return pooled
 
@@ -378,11 +383,10 @@ class GraphCNN(nn.Module):
             pooled = torch.roll(pooled, shifts=shift, dims=1)
             
 
-        pre_bin = pooled
-        # print(pooled)
-        pooled = torch.sign(pooled)
+        pre_torus = pooled
+        pooled = fhrr_to_torus(pooled)
         if return_pre_sign:
-            return pooled, pre_bin
+            return pooled, pre_torus
         return pooled
 
 
@@ -392,7 +396,7 @@ class GraphCNN(nn.Module):
         """
         return_node_rep: if True, return (H, batch) with H [N, D] node hypervectors and batch [N]
                          for use with attention readout. Only one of graph-level or node-level is returned.
-        capture_aux: if True, fill self._aux with layer pre/post binarization HV and sigma-pi tensors
+        capture_aux: if True, fill self._aux with layer pre/post FHRR torus HV and sigma-pi tensors
                      (same forward math as capture_aux=False).
         """
         self._aux = None
@@ -403,6 +407,8 @@ class GraphCNN(nn.Module):
         N = start_idx[-1]
 
         X_concat = torch.cat([g.node_features for g in batch_graph], 0).to(self.device)
+        if not X_concat.is_complex():
+            X_concat = promote_real_to_fhrr(X_concat)
         graph_pool = self.__preprocess_graphpool(batch_graph)
         Adj_block = self.__preprocess_neighbors_sumavepool(batch_graph)
 
@@ -412,7 +418,9 @@ class GraphCNN(nn.Module):
         edge_H = None
         if batched_ei is not None and batched_ea is not None and self.edge_feat_dim > 0 and hasattr(self, "W_edge"):
             edge_index = batched_ei
-            edge_H = torch.mm(batched_ea.to(X_concat.dtype), self.W_edge)
+            ea = batched_ea.to(torch.complex64)
+            edge_H = torch.mm(ea, self.W_edge.to(ea.device))
+            edge_H = fhrr_to_torus(edge_H)
 
         hidden_rep = [X_concat]
         h = X_concat
@@ -465,9 +473,9 @@ class GraphCNN(nn.Module):
                     batch[start_idx[b] : start_idx[b + 1]] = b
                 if capture_aux:
                     self._aux["batch_node_graph_id"] = batch.detach().cpu()
-                return (F_v, batch)
+                return (complex_to_real_stacked(F_v), batch)
             g = self.multi_stat_pool(F_v, graph_pool, start_idx)
-            return g.unsqueeze(0)
+            return complex_to_real_stacked(g).unsqueeze(0)
         if capture_aux:
             self._aux = {
                 "layer_pre_bin": layer_pre_bin,
@@ -492,12 +500,12 @@ class GraphCNN(nn.Module):
                 batch[start_idx[b] : start_idx[b + 1]] = b
             if capture_aux and self._aux is not None:
                 self._aux["batch_node_graph_id"] = batch.detach().cpu()
-            return (H, batch)
+            return (complex_to_real_stacked(H), batch)
 
         pooled_hS = []
         for layer, h in enumerate(hidden_rep):
-            pooled_h = torch.spmm(graph_pool, h)
+            pooled_h = complex_spmm(graph_pool, h)
             pooled_hS.append(pooled_h)
-        return torch.stack(pooled_hS, dim=0)
+        return complex_to_real_stacked(torch.stack(pooled_hS, dim=0))
 
     

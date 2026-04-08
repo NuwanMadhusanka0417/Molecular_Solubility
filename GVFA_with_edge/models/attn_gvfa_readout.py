@@ -159,7 +159,7 @@ class AttnGVFARegressor(nn.Module):
 
 def build_attn_gvfa_regressor(encoder, D, readout_hidden=None, regressor_hidden=64, dropout=0.2,
                               use_layernorm=True, num_heads=1, regressor_hidden_dims=None):
-    """Factory: encoder is already built (e.g. GraphCNN). D = node HV dimension from encoder."""
+    """Factory: encoder is already built (e.g. GraphCNN). D = node embedding dim (for FHRR GraphCNN, use 2*HV_DIM)."""
     return AttnGVFARegressor(
         encoder, D,
         readout_hidden=readout_hidden,

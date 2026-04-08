@@ -1,5 +1,6 @@
 import torch
 
+
 def getEmbedding(model, device, train_graphs, batch_size=100, SUM=True, use_size_aware=True, hop_alpha=1.0):
     """
     Get graph-level embeddings for regression.
@@ -7,8 +8,9 @@ def getEmbedding(model, device, train_graphs, batch_size=100, SUM=True, use_size
     use_size_aware: if True (default), applies two changes to help solubility prediction:
         1) Scale each graph's pooled vector at every layer by 1/√(num_nodes), so larger
            molecules don't dominate the sum-pooled representation.
-        2) Append num_nodes as an extra feature (last column). XGBoost then gets D+1
-           dimensions; the last is atom count, which is important for solubility.
+        2) Append num_nodes as an extra feature (last column). With FHRR, pooled dim is
+           2*D per stat block (real/imag); multi-stat pool is 3*(2*D). XGBoost gets one extra
+           column for atom count.
 
     hop_alpha: topologically decaying hop weights. When combining layers, applies
         weights = alpha ** layer_ids so nearer hops (lower layer_id) get higher weight.
@@ -26,7 +28,7 @@ def getEmbedding(model, device, train_graphs, batch_size=100, SUM=True, use_size
         end_idx = min(start_idx + batch_size, num_graphs)
         batch_graphs = train_graphs[start_idx:end_idx]
 
-        # output: [num_layers, batch_size, D]
+        # output: [num_layers, batch_size, 2*D] real (model already converts complex to real/imag)
         output = model(batch_graphs)
 
         # Size-aware: scale each graph's representation by 1/√(num_nodes) at every layer

@@ -1,15 +1,14 @@
-
 import torch
 import numpy as np
 import math
 import torch.nn.functional as F
-# import torch
+
+from src.fhrr_ops import fhrr_bind, fhrr_to_torus, random_phase_matrix
+
+
 def hv_bind(a, b):
-    """
-    Hypervector binding for bipolar HVs: elementwise multiplication.
-    a, b: [D]
-    """
-    return a * b
+    """FHRR binding: element-wise complex product (then torus projection)."""
+    return fhrr_bind(a, b)
 
 def vsa_message_passing(node_H, edge_H, edge_index, alpha=1.0):
     """
@@ -47,52 +46,48 @@ def vsa_message_passing(node_H, edge_H, edge_index, alpha=1.0):
     # binarize back to {-1,+1} for stability
     # updated = torch.sign(updated)
     # updated[updated == 0] = 1.0
-    updated = F.normalize(updated, p=2, dim=1)
+    updated = fhrr_to_torus(updated)
 
     return updated
 
-def _random_projection_matrix(in_dim, out_dim, orthogonal=False, seed=0):
+
+def _random_projection_matrix_fhrr(in_dim, out_dim, orthogonal=False, seed=0):
     """
-    Build shared random projection W: (in_dim, out_dim).
-    - orthogonal=True: QR-based orthonormal columns → better preserves norms (info-preserving).
-    - orthogonal=False: standard Gaussian / sqrt(in_dim) (JL-style).
+    FHRR projection matrix W: (in_dim, out_dim) of unit-magnitude phasors.
+
+    Each element is e^{i*theta} with theta ~ U[0, 2*pi] (canonical FHRR).
+    When orthogonal=True the complex matrix is QR-orthogonalized for info preservation.
     """
-    g = torch.Generator().manual_seed(seed)
-    W = torch.randn(in_dim, out_dim, generator=g)
+    W = random_phase_matrix(in_dim, out_dim, seed=seed)
     if orthogonal and out_dim <= in_dim:
-        # Orthonormal columns: preserves ||x|| when out_dim >= in_dim; minimizes distortion when out_dim < in_dim
         Q, _ = torch.linalg.qr(W)
         W = Q[:, :out_dim]
-    else:
-        W = W / math.sqrt(in_dim)
     return W
 
 
 def project_with_vsa(g_list, new_dim, projection_type="orthogonal", seed=0):
     """
-    Project node features to hypervectors only.
+    Project node features to FHRR hypervectors (complex phasors on the unit torus).
 
-    Edge conditioning is done solely in GraphCNN (single projection + FFT binding)
-    so edge_attr is not projected or used here.
+    Edge conditioning is done in GraphCNN (complex projection + FHRR binding).
 
-    projection_type: "orthogonal" (default) = orthonormal random projection, better
-        preserves norms and distances; "gaussian" = standard JL-style random projection.
+    projection_type: "orthogonal" (default) = complex QR-based projection; "gaussian" = JL-style.
     seed: controls the random projection matrix (same seed => same W across train/test).
     """
     torch.manual_seed(seed)
     F_node = g_list[0].node_features.shape[1]
     use_orthogonal = projection_type == "orthogonal"
-    W_node = _random_projection_matrix(F_node, new_dim, orthogonal=use_orthogonal, seed=seed)
+    W_node = _random_projection_matrix_fhrr(F_node, new_dim, orthogonal=use_orthogonal, seed=seed)
 
-    print("VSA_conversion: node feature dim =", F_node, "new_dim =", new_dim,
+    print("VSA_conversion (FHRR): node feature dim =", F_node, "new_dim =", new_dim,
           "projection =", projection_type)
 
     for g in g_list:
-        X = g.node_features  # [N, F_node]
-        node_H = torch.matmul(X, W_node)  # [N, D]
-        g.node_features = node_H
+        X = g.node_features.to(torch.float32)  # [N, F_node]
+        node_H = torch.matmul(X, W_node)  # [N, D] complex
+        g.node_features = fhrr_to_torus(node_H)
 
-    print("g list item shape after VSA:", g_list[0].node_features.shape)
+    print("g list item shape after VSA:", g_list[0].node_features.shape, "dtype:", g_list[0].node_features.dtype)
     return g_list
 
 def VSA_conversion(g_list, new_dim=None, projection_type="orthogonal", seed=0):
