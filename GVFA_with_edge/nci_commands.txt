@@ -26,4 +26,4 @@ python GVFA_edge_main.py --seeds 42,43 --dims "1000" --sigma_pi "0,1"
 
 python GVFA_edge_main.py --seed 42 --dims "1000,2000" --sigma_pi legacy
 
-python GVFA_edge_main.py --seeds 42,43,44 --dims "1000,2000" --sigma_pi all --save_csv
+python GVFA_edge_main.py --seeds 42,43,44,45,46 --dims "2000,5000" --sigma_pi "0,1" --save_csv
