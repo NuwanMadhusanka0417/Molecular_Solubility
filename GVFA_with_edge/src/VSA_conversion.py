@@ -83,7 +83,7 @@ def project_with_vsa(g_list, new_dim, projection_type="orthogonal", seed=0):
           "projection =", projection_type)
 
     for g in g_list:
-        X = g.node_features.to(torch.float32)  # [N, F_node]
+        X = g.node_features.to(torch.complex64)  # [N, F_node] promoted to complex
         node_H = torch.matmul(X, W_node)  # [N, D] complex
         g.node_features = fhrr_to_torus(node_H)
 
