@@ -216,20 +216,26 @@ class GraphCNN(nn.Module):
         """
         Same computation as sigma_pi_expansion, also returns per-order hypervectors
         (for analysis export). *_0(F)=F, *_t(F)= pi(*_{t-1}(F)) circ F.
+
+        Always computes the full recursion from 0..max(sigma_pi_orders) so that
+        higher-order terms build on correct intermediate values.
         """
         D = F1.shape[1]
+        max_order = max(self.sigma_pi_orders)
+        requested = set(self.sigma_pi_orders)
         result = torch.zeros_like(F1)
-        ast_prev = F1
         terms = {}
-        for t in sorted(self.sigma_pi_orders):
+        ast_prev = F1  # *_0(F) = F
+        for t in range(max_order + 1):
             if t == 0:
                 ast_t = F1
             else:
                 ast_t = self.bind(self._pi(ast_prev, shift=max(1, D // 3)), F1)
                 ast_t = fhrr_to_torus(ast_t, eps=eps)
             ast_prev = ast_t
-            result = result + ast_t
-            terms[t] = ast_t.clone()
+            if t in requested:
+                result = result + ast_t
+                terms[t] = ast_t.clone()
         F_v = fhrr_to_torus(result, eps=eps)
         return F_v, terms
 
