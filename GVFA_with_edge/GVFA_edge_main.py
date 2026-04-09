@@ -99,7 +99,11 @@ def parse_args():
     p.add_argument('--batch_size', type=int, default=64)
     p.add_argument('--use_ridge', action='store_true', default=True)
     p.add_argument('--no_ridge', action='store_false', dest='use_ridge')
-    p.add_argument('--seed', type=int, default=42, help='RNG seed (PyTorch, NumPy, Python, VSA/edge init, XGB; train/test split when dataset=old)')
+    p.add_argument('--seed', type=int, default=42,
+                   help='Single RNG seed (used when --seeds is not set)')
+    p.add_argument('--seeds', type=str, default=None,
+                   help='Comma-separated seeds, e.g. "0,1,42,123". '
+                        'Overrides --seed. First seed used for data split.')
     p.add_argument(
         '--sigma_pi',
         type=str,
@@ -144,117 +148,175 @@ def _parse_sigma_pi_arg(s: str):
 
 
 def run_gvfa_ridge(args, train_data, test_data, device):
-    seed = args.seed
+    seeds = ([int(s.strip()) for s in args.seeds.split(',') if s.strip()]
+             if args.seeds else [args.seed])
     dims = [int(x) for x in args.dims.split(',')]
     sigma_configs = _parse_sigma_pi_arg(args.sigma_pi)
+    multi_seed = len(seeds) > 1
 
     save = args.save_results is not None
+    summary_fields = [
+        'dim', 'sigma_pi', 'sigma_tag', 'seed',
+        'RMSE', 'STD_err', 'MAE', 'R2_COD', 'Pearson_R2', 'Pearson_R',
+    ]
     if save:
         os.makedirs(args.save_results, exist_ok=True)
         summary_path = os.path.join(args.save_results, 'results_summary.csv')
-        summary_fields = [
-            'dim', 'sigma_pi', 'sigma_tag', 'seed',
-            'RMSE', 'STD_err', 'MAE', 'R2_COD', 'Pearson_R2', 'Pearson_R',
-        ]
         with open(summary_path, 'w', newline='') as f:
             csv.DictWriter(f, fieldnames=summary_fields).writeheader()
 
+    all_aggregated = []
+
     for dim in dims:
-        random.seed(seed)
-        np.random.seed(seed)
-        torch.manual_seed(seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(seed)
-
-        train_graphs = create_graph_list(train_data)
-        test_graphs = create_graph_list(test_data)
-        test_HVs = VSA_conversion(
-            test_graphs.copy(), dim, projection_type="orthogonal", seed=seed,
-        )
-        train_HVs = VSA_conversion(
-            train_graphs.copy(), dim, projection_type="orthogonal", seed=seed,
-        )
-
         for sigma_pi_orders, sigma_tag in sigma_configs:
-            torch.manual_seed(seed)
-            if torch.cuda.is_available():
-                torch.cuda.manual_seed_all(seed)
-
-            model_eq1 = GraphCNN(
-                test_HVs[0].node_features.shape[1], 5, 1, 'sum', 'sum', device, 10,
-                edge_feat_dim=5, edge_projection_type="orthogonal",
-                use_reservoir=True, hop_decay=0.85, sigma_pi_orders=sigma_pi_orders,
-                rng_seed=seed,
-            )
-            train_emb, train_labels = getEmbedding(
-                model_eq1, device, train_HVs, use_size_aware=True, hop_alpha=1.0,
-            )
-            test_emb, test_labels = getEmbedding(
-                model_eq1, device, test_HVs, use_size_aware=True, hop_alpha=1.0,
-            )
-            train_emb = train_emb.squeeze(0)
-            test_emb = test_emb.squeeze(0)
-
-            if args.use_ridge:
-                reg = RidgeCV(alphas=np.logspace(-4, 2, 50), cv=5, scoring='neg_mean_squared_error')
-                reg.fit(train_emb, train_labels)
-                pred = reg.predict(test_emb)
-            else:
-                from xgboost import XGBRegressor
-                reg = XGBRegressor(
-                    n_estimators=2000, learning_rate=0.03, max_depth=7,
-                    subsample=0.8, colsample_bytree=0.8, reg_lambda=1.0, reg_alpha=0.0,
-                    random_state=seed, n_jobs=4, tree_method="hist",
-                )
-                reg.fit(train_emb, train_labels, eval_set=[(test_emb, test_labels)], verbose=False)
-                pred = reg.predict(test_emb)
-
-            m = compute_metrics(test_labels, pred)
             orders_str = ','.join(str(x) for x in sigma_pi_orders)
+            seed_metrics = []
+
+            for seed in seeds:
+                random.seed(seed)
+                np.random.seed(seed)
+                torch.manual_seed(seed)
+                if torch.cuda.is_available():
+                    torch.cuda.manual_seed_all(seed)
+
+                train_graphs = create_graph_list(train_data)
+                test_graphs = create_graph_list(test_data)
+                test_HVs = VSA_conversion(
+                    test_graphs.copy(), dim, projection_type="orthogonal", seed=seed,
+                )
+                train_HVs = VSA_conversion(
+                    train_graphs.copy(), dim, projection_type="orthogonal", seed=seed,
+                )
+
+                torch.manual_seed(seed)
+                if torch.cuda.is_available():
+                    torch.cuda.manual_seed_all(seed)
+
+                model_eq1 = GraphCNN(
+                    test_HVs[0].node_features.shape[1], 5, 1, 'sum', 'sum', device, 10,
+                    edge_feat_dim=5, edge_projection_type="orthogonal",
+                    use_reservoir=True, hop_decay=0.85, sigma_pi_orders=sigma_pi_orders,
+                    rng_seed=seed,
+                )
+                train_emb, train_labels = getEmbedding(
+                    model_eq1, device, train_HVs, use_size_aware=True, hop_alpha=1.0,
+                )
+                test_emb, test_labels = getEmbedding(
+                    model_eq1, device, test_HVs, use_size_aware=True, hop_alpha=1.0,
+                )
+                train_emb = train_emb.squeeze(0)
+                test_emb = test_emb.squeeze(0)
+
+                if args.use_ridge:
+                    reg = RidgeCV(alphas=np.logspace(-4, 2, 50), cv=5, scoring='neg_mean_squared_error')
+                    reg.fit(train_emb, train_labels)
+                    pred = reg.predict(test_emb)
+                else:
+                    from xgboost import XGBRegressor
+                    reg = XGBRegressor(
+                        n_estimators=2000, learning_rate=0.03, max_depth=7,
+                        subsample=0.8, colsample_bytree=0.8, reg_lambda=1.0, reg_alpha=0.0,
+                        random_state=seed, n_jobs=4, tree_method="hist",
+                    )
+                    reg.fit(train_emb, train_labels, eval_set=[(test_emb, test_labels)], verbose=False)
+                    pred = reg.predict(test_emb)
+
+                m = compute_metrics(test_labels, pred)
+                seed_metrics.append(m)
+                print(
+                    f"  seed={seed}  Dim={dim}  sigma_pi=[{orders_str}]  ({sigma_tag})  "
+                    f"RMSE={m['rmse']:.4f}  STD_err={m['std_err']:.4f}  MAE={m['mae']:.4f}  "
+                    f"R2_COD={m['r2_cod']:.4f}  Pearson_R2={m['pearson_r2']:.4f}",
+                )
+
+                if save:
+                    y_true = np.asarray(test_labels).ravel()
+                    y_pred = np.asarray(pred).ravel()
+                    suffix = f'_seed{seed}' if multi_seed else ''
+                    pred_path = os.path.join(
+                        args.save_results, f'predictions_dim{dim}_{sigma_tag}{suffix}.csv',
+                    )
+                    with open(pred_path, 'w', newline='') as f:
+                        w = csv.writer(f)
+                        w.writerow(['y_true', 'y_pred', 'error'])
+                        for yt, yp in zip(y_true, y_pred):
+                            w.writerow([f'{yt:.6f}', f'{yp:.6f}', f'{yt - yp:.6f}'])
+
+                    with open(summary_path, 'a', newline='') as f:
+                        csv.DictWriter(f, fieldnames=summary_fields).writerow({
+                            'dim': dim,
+                            'sigma_pi': f'[{orders_str}]',
+                            'sigma_tag': sigma_tag,
+                            'seed': seed,
+                            'RMSE': f'{m["rmse"]:.6f}',
+                            'STD_err': f'{m["std_err"]:.6f}',
+                            'MAE': f'{m["mae"]:.6f}',
+                            'R2_COD': f'{m["r2_cod"]:.6f}',
+                            'Pearson_R2': f'{m["pearson_r2"]:.6f}',
+                            'Pearson_R': f'{m["pearson_r"]:.6f}',
+                        })
+                    print(f"  Saved predictions to {pred_path}")
+
+                if args.export_analysis_dir:
+                    sub = os.path.join(
+                        args.export_analysis_dir,
+                        f"ridge_dim_{dim}_sigma_{sigma_tag}_seed{seed}",
+                    )
+                    export_hypervector_analysis(
+                        model_eq1, train_graphs, device, sub, "train", args.batch_size,
+                    )
+                    export_hypervector_analysis(
+                        model_eq1, test_graphs, device, sub, "test", args.batch_size,
+                    )
+                    print(f"  Saved HV analysis under {sub}")
+
+            # --- per-(dim, sigma_pi) aggregation across seeds ---
+            if multi_seed:
+                agg = {}
+                for key in ('rmse', 'mae', 'r2_cod'):
+                    vals = [sm[key] for sm in seed_metrics]
+                    agg[key] = {'mean': float(np.mean(vals)),
+                                'std': float(np.std(vals, ddof=0))}
+                all_aggregated.append((dim, orders_str, sigma_tag, agg, len(seeds)))
+
+                print(
+                    f"  >> MEAN±STD ({len(seeds)} seeds)  Dim={dim}  [{orders_str}]  "
+                    f"RMSE={agg['rmse']['mean']:.4f}±{agg['rmse']['std']:.4f}  "
+                    f"MAE={agg['mae']['mean']:.4f}±{agg['mae']['std']:.4f}  "
+                    f"R2={agg['r2_cod']['mean']:.4f}±{agg['r2_cod']['std']:.4f}"
+                )
+
+                if save:
+                    with open(summary_path, 'a', newline='') as f:
+                        csv.DictWriter(f, fieldnames=summary_fields).writerow({
+                            'dim': dim,
+                            'sigma_pi': f'[{orders_str}]',
+                            'sigma_tag': sigma_tag,
+                            'seed': f'MEAN±STD({len(seeds)})',
+                            'RMSE': f'{agg["rmse"]["mean"]:.6f}±{agg["rmse"]["std"]:.6f}',
+                            'STD_err': '',
+                            'MAE': f'{agg["mae"]["mean"]:.6f}±{agg["mae"]["std"]:.6f}',
+                            'R2_COD': f'{agg["r2_cod"]["mean"]:.6f}±{agg["r2_cod"]["std"]:.6f}',
+                            'Pearson_R2': '',
+                            'Pearson_R': '',
+                        })
+
+    # --- final summary table ---
+    if multi_seed and all_aggregated:
+        print("\n" + "=" * 90)
+        print(f"MULTI-SEED SUMMARY  (seeds: {seeds})")
+        print("=" * 90)
+        print(f"{'Dim':>6}  {'Sigma-Pi':<14}  {'RMSE (mean±std)':>20}  "
+              f"{'MAE (mean±std)':>20}  {'R2 (mean±std)':>20}")
+        print("-" * 90)
+        for dim, orders_str, sigma_tag, agg, n in all_aggregated:
             print(
-                f"Dim={dim}  sigma_pi=[{orders_str}]  ({sigma_tag})  "
-                f"RMSE={m['rmse']:.4f}  STD_err={m['std_err']:.4f}  MAE={m['mae']:.4f}  "
-                f"R2_COD={m['r2_cod']:.4f}  Pearson_R2={m['pearson_r2']:.4f}",
+                f"{dim:>6}  [{orders_str}]{'':>{12-len(orders_str)}}  "
+                f"{agg['rmse']['mean']:>8.4f}±{agg['rmse']['std']:<8.4f}  "
+                f"{agg['mae']['mean']:>8.4f}±{agg['mae']['std']:<8.4f}  "
+                f"{agg['r2_cod']['mean']:>8.4f}±{agg['r2_cod']['std']:<8.4f}"
             )
-
-            if save:
-                y_true = np.asarray(test_labels).ravel()
-                y_pred = np.asarray(pred).ravel()
-                pred_path = os.path.join(
-                    args.save_results, f'predictions_dim{dim}_{sigma_tag}.csv',
-                )
-                with open(pred_path, 'w', newline='') as f:
-                    w = csv.writer(f)
-                    w.writerow(['y_true', 'y_pred', 'error'])
-                    for yt, yp in zip(y_true, y_pred):
-                        w.writerow([f'{yt:.6f}', f'{yp:.6f}', f'{yt - yp:.6f}'])
-
-                with open(summary_path, 'a', newline='') as f:
-                    csv.DictWriter(f, fieldnames=summary_fields).writerow({
-                        'dim': dim,
-                        'sigma_pi': f'[{orders_str}]',
-                        'sigma_tag': sigma_tag,
-                        'seed': seed,
-                        'RMSE': f'{m["rmse"]:.6f}',
-                        'STD_err': f'{m["std_err"]:.6f}',
-                        'MAE': f'{m["mae"]:.6f}',
-                        'R2_COD': f'{m["r2_cod"]:.6f}',
-                        'Pearson_R2': f'{m["pearson_r2"]:.6f}',
-                        'Pearson_R': f'{m["pearson_r"]:.6f}',
-                    })
-                print(f"  Saved predictions to {pred_path}")
-
-            if args.export_analysis_dir:
-                sub = os.path.join(
-                    args.export_analysis_dir, f"ridge_dim_{dim}_sigma_{sigma_tag}",
-                )
-                export_hypervector_analysis(
-                    model_eq1, train_graphs, device, sub, "train", args.batch_size,
-                )
-                export_hypervector_analysis(
-                    model_eq1, test_graphs, device, sub, "test", args.batch_size,
-                )
-                print(f"  Saved HV analysis under {sub}")
+        print("=" * 90)
 
 
 # ---------------------------------------------------------------------------
@@ -265,7 +327,8 @@ def main():
     args = parse_args()
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print("Running for dataset: ", args.dataset)
-    train_data, test_data = load_data(dataset=args.dataset, seed=args.seed)
+    data_seed = int(args.seeds.split(',')[0]) if args.seeds else args.seed
+    train_data, test_data = load_data(dataset=args.dataset, seed=data_seed)
     run_gvfa_ridge(args, train_data, test_data, device)
 
 
