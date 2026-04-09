@@ -54,16 +54,24 @@ def vsa_message_passing(node_H, edge_H, edge_index, alpha=1.0):
 def _random_projection_matrix(in_dim, out_dim, orthogonal=False, seed=0):
     """
     Build shared random projection W: (in_dim, out_dim).
-    - orthogonal=True: QR-based orthonormal columns → better preserves norms (info-preserving).
-    - orthogonal=False: standard Gaussian / sqrt(in_dim) (JL-style).
+    - orthogonal=True  → QR-based orthonormal projection in both directions:
+        * out_dim <= in_dim: W has orthonormal columns (W^T W = I).
+        * out_dim >  in_dim: W has orthonormal rows   (W W^T = I),
+          which exactly preserves norms: ||xW||= ||x||.
+    - orthogonal=False → standard Gaussian / sqrt(in_dim) (JL-style).
     """
     g = torch.Generator().manual_seed(seed)
-    W = torch.randn(in_dim, out_dim, generator=g)
-    if orthogonal and out_dim <= in_dim:
-        # Orthonormal columns: preserves ||x|| when out_dim >= in_dim; minimizes distortion when out_dim < in_dim
-        Q, _ = torch.linalg.qr(W)
-        W = Q[:, :out_dim]
+    if orthogonal:
+        if out_dim <= in_dim:
+            W = torch.randn(in_dim, out_dim, generator=g)
+            Q, _ = torch.linalg.qr(W)
+            W = Q[:, :out_dim]
+        else:
+            R = torch.randn(out_dim, in_dim, generator=g)
+            Q, _ = torch.linalg.qr(R)
+            W = Q.T                         # (in_dim, out_dim), orthonormal rows
     else:
+        W = torch.randn(in_dim, out_dim, generator=g)
         W = W / math.sqrt(in_dim)
     return W
 

@@ -41,13 +41,19 @@ class GraphCNN(nn.Module):
 
         if self.edge_feat_dim > 0:
             g = torch.Generator().manual_seed(rng_seed)
-            W_edge = torch.randn(self.edge_feat_dim, input_dim, generator=g)
-            if edge_projection_type == "orthogonal" and input_dim >= self.edge_feat_dim:
-                # Orthonormal columns: preserves norms of projected edge vectors (info-preserving)
-                A = torch.randn(input_dim, self.edge_feat_dim, generator=g)
-                Q, _ = torch.linalg.qr(A)
-                W_edge = Q[:, :self.edge_feat_dim].T  # (edge_feat_dim, input_dim)
+            if edge_projection_type == "orthogonal":
+                if input_dim >= self.edge_feat_dim:
+                    # out_dim > in_dim: orthonormal rows (W W^T = I, preserves norms exactly)
+                    A = torch.randn(input_dim, self.edge_feat_dim, generator=g)
+                    Q, _ = torch.linalg.qr(A)
+                    W_edge = Q[:, :self.edge_feat_dim].T   # (edge_feat_dim, input_dim)
+                else:
+                    # out_dim <= in_dim: orthonormal columns (W^T W = I)
+                    A = torch.randn(self.edge_feat_dim, input_dim, generator=g)
+                    Q, _ = torch.linalg.qr(A)
+                    W_edge = Q[:, :input_dim]               # (edge_feat_dim, input_dim)
             else:
+                W_edge = torch.randn(self.edge_feat_dim, input_dim, generator=g)
                 W_edge = W_edge / math.sqrt(self.edge_feat_dim)
             self.register_buffer("W_edge", W_edge)
 
