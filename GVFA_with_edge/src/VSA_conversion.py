@@ -57,13 +57,26 @@ def _random_projection_matrix(in_dim, out_dim, orthogonal=False, seed=0):
     - orthogonal=True: QR-based orthonormal columns → better preserves norms (info-preserving).
     - orthogonal=False: standard Gaussian / sqrt(in_dim) (JL-style).
     """
-    g = torch.Generator().manual_seed(seed)
-    W = torch.randn(in_dim, out_dim, generator=g)
-    if orthogonal and out_dim <= in_dim:
-        # Orthonormal columns: preserves ||x|| when out_dim >= in_dim; minimizes distortion when out_dim < in_dim
-        Q, _ = torch.linalg.qr(W)
-        W = Q[:, :out_dim]
+    # g = torch.Generator().manual_seed(seed)
+    # W = torch.randn(in_dim, out_dim, generator=g)
+    # if orthogonal and out_dim <= in_dim:
+    #     # Orthonormal columns: preserves ||x|| when out_dim >= in_dim; minimizes distortion when out_dim < in_dim
+    #     Q, _ = torch.linalg.qr(W)
+    #     W = Q[:, :out_dim]
+    # else:
+    #     W = W / math.sqrt(in_dim)
+
+    if orthogonal:
+        if out_dim <= in_dim:
+            # Orthonormal columns: W^T W = I
+            Q, _ = torch.linalg.qr(torch.randn(in_dim, out_dim, generator=g))
+            W = Q[:, :out_dim]
+        else:
+            # Orthonormal rows: W W^T = I
+            Q, _ = torch.linalg.qr(torch.randn(out_dim, in_dim, generator=g))
+            W = Q[:, :in_dim].T  # shape (in_dim, out_dim)
     else:
+        W = torch.randn(in_dim, out_dim, generator=g)
         W = W / math.sqrt(in_dim)
     return W
 
