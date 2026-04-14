@@ -18,6 +18,7 @@ Usage:
 import argparse
 import csv
 import os
+import pickle
 import random
 import time
 
@@ -30,7 +31,7 @@ from sklearn.model_selection import train_test_split
 
 from src.create_graphs import create_graph_list
 from src.load_data import load_data, ZINCLikeCSV
-from src.VSA_conversion import VSA_conversion
+from src.VSA_conversion import _random_projection_matrix
 from src.embeddings import getEmbedding
 from models.graphcnnVSA_Binding_FULL import GraphCNN
 
@@ -87,23 +88,76 @@ def parse_sigma_pi(s: str):
     return [(orders, tag)]
 
 
-def build_embeddings(data, dim, seed, sigma_pi_orders, device, batch_size=64):
-    """Build GVFA embeddings for a dataset with a given config."""
-    set_all_seeds(seed)
+def precompute_graphs(data, cache_path=None):
+    """
+    Build graph list + neighbor/edge_mat ONCE.  This is the expensive step
+    (RDKit 3D conformers, atom features).  The result is seed/dim independent.
+    Optionally load from / save to a pickle cache on disk.
+    """
+    if cache_path and os.path.exists(cache_path):
+        print(f"  Loading cached graphs from {cache_path}")
+        with open(cache_path, 'rb') as f:
+            return pickle.load(f)
+
     graphs = create_graph_list(data)
-    hvs = VSA_conversion(graphs.copy(), dim, projection_type="orthogonal", seed=seed)
+
+    for g in graphs:
+        g.neighbors = [[] for _ in range(len(g.g))]
+        for i, j in g.g.edges():
+            g.neighbors[i].append(j)
+            g.neighbors[j].append(i)
+        degree_list = [len(g.neighbors[i]) for i in range(len(g.g))]
+        g.max_neighbor = max(degree_list) if degree_list else 0
+
+        if hasattr(g, "edge_index") and g.edge_index is not None and g.edge_index.numel() > 0:
+            g.edge_mat = g.edge_index.clone()
+        else:
+            edges = [list(pair) for pair in g.g.edges()]
+            edges.extend([[j, i] for i, j in edges])
+            if edges:
+                g.edge_mat = torch.LongTensor(edges).transpose(0, 1)
+            else:
+                g.edge_mat = torch.zeros((2, 0), dtype=torch.long)
+
+    if cache_path:
+        os.makedirs(os.path.dirname(cache_path) or '.', exist_ok=True)
+        with open(cache_path, 'wb') as f:
+            pickle.dump(graphs, f, protocol=pickle.HIGHEST_PROTOCOL)
+        print(f"  Saved cached graphs to {cache_path}")
+
+    return graphs
+
+
+def build_embeddings_fast(graphs, original_features, dim, seed,
+                          sigma_pi_orders, device):
+    """
+    Project cached graphs and extract embeddings.  Skips create_graph_list
+    and neighbor-building entirely — only does the cheap projection + encoder.
+
+    graphs:            pre-computed graph list (from precompute_graphs)
+    original_features: list of [N_i, F_node] tensors (saved once before loop)
+    """
+    set_all_seeds(seed)
+
+    W_node = _random_projection_matrix(
+        original_features[0].shape[1], dim, orthogonal=True, seed=seed,
+    )
+    for g, orig_feat in zip(graphs, original_features):
+        g.node_features = torch.matmul(orig_feat, W_node)
 
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
     encoder = GraphCNN(
-        hvs[0].node_features.shape[1], 5, 1, 'sum', 'sum', device, 10,
+        dim, 5, 1, 'sum', 'sum', device, 10,
         edge_feat_dim=5, edge_projection_type="orthogonal",
         use_reservoir=True, hop_decay=0.85, sigma_pi_orders=sigma_pi_orders,
         rng_seed=seed,
     )
-    emb, labels = getEmbedding(encoder, device, hvs, use_size_aware=True, hop_alpha=1.0)
+    emb, labels = getEmbedding(
+        encoder, device, graphs, use_size_aware=True, hop_alpha=1.0,
+    )
     return emb.squeeze(0), labels
 
 
@@ -186,6 +240,47 @@ def main():
     print("=" * 80)
 
     # ------------------------------------------------------------------
+    # Pre-compute graph lists ONCE (the expensive RDKit step)
+    # ------------------------------------------------------------------
+    cache_dir = os.path.join(args.save_dir, 'graph_cache')
+    os.makedirs(cache_dir, exist_ok=True)
+
+    t_cache = time.time()
+    print("Pre-computing graph lists (RDKit 3D + atom features)...")
+
+    print(f"  train ({len(train_sub_data)} molecules)...")
+    train_graphs = precompute_graphs(
+        train_sub_data,
+        os.path.join(cache_dir, 'train_sub_graphs.pkl'),
+    )
+    train_orig_feats = [g.node_features.clone() for g in train_graphs]
+
+    print(f"  val ({len(val_data)} molecules)...")
+    val_graphs = precompute_graphs(
+        val_data,
+        os.path.join(cache_dir, 'val_graphs.pkl'),
+    )
+    val_orig_feats = [g.node_features.clone() for g in val_graphs]
+
+    print(f"  full_train ({len(full_train_data)} molecules)...")
+    full_train_graphs = precompute_graphs(
+        full_train_data,
+        os.path.join(cache_dir, 'full_train_graphs.pkl'),
+    )
+    full_train_orig_feats = [g.node_features.clone() for g in full_train_graphs]
+
+    print(f"  test ({len(test_data)} molecules)...")
+    test_graphs = precompute_graphs(
+        test_data,
+        os.path.join(cache_dir, 'test_graphs.pkl'),
+    )
+    test_orig_feats = [g.node_features.clone() for g in test_graphs]
+
+    print(f"Graph pre-computation done in {time.time() - t_cache:.1f}s  "
+          f"(cached to {cache_dir}/)")
+    print("=" * 80)
+
+    # ------------------------------------------------------------------
     # Phase 1: Sweep on validation
     # ------------------------------------------------------------------
     sweep_csv = os.path.join(args.save_dir, 'phase1_validation_sweep.csv')
@@ -205,11 +300,13 @@ def main():
             for sigma_pi_orders, sigma_tag in sigma_configs:
                 t0 = time.time()
 
-                tr_emb, tr_labels = build_embeddings(
-                    train_sub_data, dim, seed, sigma_pi_orders, device, args.batch_size,
+                tr_emb, tr_labels = build_embeddings_fast(
+                    train_graphs, train_orig_feats, dim, seed,
+                    sigma_pi_orders, device,
                 )
-                va_emb, va_labels = build_embeddings(
-                    val_data, dim, seed, sigma_pi_orders, device, args.batch_size,
+                va_emb, va_labels = build_embeddings_fast(
+                    val_graphs, val_orig_feats, dim, seed,
+                    sigma_pi_orders, device,
                 )
 
                 reg = RidgeCV(
@@ -283,13 +380,13 @@ def main():
     print(f"Retraining on full training data ({len(full_train_data)} molecules)...")
     print("=" * 80)
 
-    full_emb, full_labels = build_embeddings(
-        full_train_data, best_dim, best_seed, best_sigma_orders,
-        device, args.batch_size,
+    full_emb, full_labels = build_embeddings_fast(
+        full_train_graphs, full_train_orig_feats, best_dim, best_seed,
+        best_sigma_orders, device,
     )
-    test_emb, test_labels = build_embeddings(
-        test_data, best_dim, best_seed, best_sigma_orders,
-        device, args.batch_size,
+    test_emb, test_labels = build_embeddings_fast(
+        test_graphs, test_orig_feats, best_dim, best_seed,
+        best_sigma_orders, device,
     )
 
     reg_final = RidgeCV(
@@ -360,13 +457,13 @@ def main():
             cfg for cfg in sigma_configs if cfg[1] == r_sigma_tag
         ][0][0]
 
-        fe, fl = build_embeddings(
-            full_train_data, r_dim, r_seed, r_sigma_orders,
-            device, args.batch_size,
+        fe, fl = build_embeddings_fast(
+            full_train_graphs, full_train_orig_feats, r_dim, r_seed,
+            r_sigma_orders, device,
         )
-        te, tl = build_embeddings(
-            test_data, r_dim, r_seed, r_sigma_orders,
-            device, args.batch_size,
+        te, tl = build_embeddings_fast(
+            test_graphs, test_orig_feats, r_dim, r_seed,
+            r_sigma_orders, device,
         )
         reg_k = RidgeCV(
             alphas=np.logspace(-4, 2, 50), cv=5,
