@@ -99,7 +99,9 @@ def parse_args():
     p.add_argument('--batch_size', type=int, default=64)
     p.add_argument('--use_ridge', action='store_true', default=True)
     p.add_argument('--no_ridge', action='store_false', dest='use_ridge')
-    p.add_argument('--seed', type=int, default=42, help='RNG seed (PyTorch, NumPy, Python, VSA/edge init, XGB; train/test split when dataset=old)')
+    p.add_argument('--seed', type=int, default=42, help='Single RNG seed (use --seeds for multiple)')
+    p.add_argument('--seeds', type=str, default=None,
+                   help='Multiple seeds: range "0-49" or comma-separated "0,1,42,123". Overrides --seed.')
     p.add_argument(
         '--sigma_pi',
         type=str,
@@ -122,6 +124,15 @@ def parse_args():
 # ---------------------------------------------------------------------------
 # GVFA + Ridge/XGBoost
 # ---------------------------------------------------------------------------
+
+def _parse_seeds(s: str):
+    """Parse '0-49' or '0,1,42,123' into a list of ints."""
+    s = s.strip()
+    if '-' in s and ',' not in s:
+        lo, hi = s.split('-')
+        return list(range(int(lo), int(hi) + 1))
+    return [int(x.strip()) for x in s.split(',') if x.strip()]
+
 
 def _parse_sigma_pi_arg(s: str):
     """Return list of (sigma_pi_orders, tag) for the ridge loop."""
@@ -264,9 +275,29 @@ def run_gvfa_ridge(args, train_data, test_data, device):
 def main():
     args = parse_args()
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    seeds = _parse_seeds(args.seeds) if args.seeds else [args.seed]
+
     print("Running for dataset: ", args.dataset)
-    train_data, test_data = load_data(dataset=args.dataset, seed=args.seed)
-    run_gvfa_ridge(args, train_data, test_data, device)
+    print(f"Seeds: {seeds}")
+
+    train_data, test_data = load_data(dataset=args.dataset, seed=seeds[0])
+
+    for seed in seeds:
+        print("\n" + "=" * 80)
+        print(f"SEED = {seed}")
+        print("=" * 80)
+
+        args.seed = seed
+
+        if args.save_results:
+            original_save = args.save_results
+            args.save_results = os.path.join(original_save, f"seed_{seed}")
+
+        run_gvfa_ridge(args, train_data, test_data, device)
+
+        if args.save_results:
+            args.save_results = original_save
 
 
 if __name__ == '__main__':
