@@ -5,6 +5,9 @@ Same pipeline as GVFA_edge_main.py (GVFA encoder -> Ridge/XGBoost), but evaluate
 k held-out folds of solubility_1.csv (or dataset train split) instead of testset_novel.csv.
 
 Prints per-fold metrics and mean ± std across folds (same metric keys as main).
+
+After CV, optionally trains on the full training CSV and evaluates on a held-out test CSV
+(same print format as GVFA_edge_main: Dim=... RMSE=... STD_err=...). No import from main.
 """
 import argparse
 import csv
@@ -73,6 +76,123 @@ def _parse_sigma_pi_arg(s: str):
     return [(orders, tag)]
 
 
+def _dims_list(args):
+    return [int(x.strip()) for x in args.dims.replace(' ', '').split(',') if x.strip()]
+
+
+def run_gvfa_ridge_train_test(args, train_data, test_data, device):
+    """
+    Train regression on full training set; evaluate on test_data.
+    Loops all --dims and --sigma_pi with args.seed (multiple seeds from outer loop).
+    """
+    seed = args.seed
+    dims = _dims_list(args)
+    sigma_configs = _parse_sigma_pi_arg(args.sigma_pi)
+
+    save = args.save_results is not None
+    summary_path = None
+    summary_fields = [
+        'dim', 'sigma_pi', 'sigma_tag', 'seed',
+        'RMSE', 'STD_err', 'MAE', 'R2_COD', 'Pearson_R2', 'Pearson_R',
+    ]
+    if save:
+        os.makedirs(args.save_results, exist_ok=True)
+        summary_path = os.path.join(args.save_results, 'results_summary.csv')
+        with open(summary_path, 'w', newline='') as f:
+            csv.DictWriter(f, fieldnames=summary_fields).writeheader()
+
+    for dim in dims:
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+
+        train_graphs = create_graph_list(train_data)
+        test_graphs = create_graph_list(test_data)
+        test_HVs = VSA_conversion(
+            test_graphs.copy(), dim, projection_type="orthogonal", seed=seed,
+        )
+        train_HVs = VSA_conversion(
+            train_graphs.copy(), dim, projection_type="orthogonal", seed=seed,
+        )
+
+        for sigma_pi_orders, sigma_tag in sigma_configs:
+            torch.manual_seed(seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(seed)
+
+            model_eq1 = GraphCNN(
+                test_HVs[0].node_features.shape[1], 5, 1, 'sum', 'sum', device, 10,
+                edge_feat_dim=5, edge_projection_type="orthogonal",
+                use_reservoir=True, hop_decay=0.85, sigma_pi_orders=sigma_pi_orders,
+                rng_seed=seed,
+            )
+            train_emb, train_labels = getEmbedding(
+                model_eq1, device, train_HVs, use_size_aware=True, hop_alpha=1.0,
+            )
+            test_emb, test_labels = getEmbedding(
+                model_eq1, device, test_HVs, use_size_aware=True, hop_alpha=1.0,
+            )
+            train_emb = train_emb.squeeze(0)
+            test_emb = test_emb.squeeze(0)
+
+            if args.use_ridge:
+                reg = RidgeCV(
+                    alphas=np.logspace(-4, 2, 50), cv=5,
+                    scoring='neg_mean_squared_error',
+                )
+                reg.fit(train_emb, train_labels)
+                pred = reg.predict(test_emb)
+            else:
+                from xgboost import XGBRegressor
+                reg = XGBRegressor(
+                    n_estimators=2000, learning_rate=0.03, max_depth=7,
+                    subsample=0.8, colsample_bytree=0.8, reg_lambda=1.0, reg_alpha=0.0,
+                    random_state=seed, n_jobs=4, tree_method="hist",
+                )
+                reg.fit(
+                    train_emb, train_labels,
+                    eval_set=[(test_emb, test_labels)], verbose=False,
+                )
+                pred = reg.predict(test_emb)
+
+            m = compute_metrics(test_labels, pred)
+            orders_str = ','.join(str(x) for x in sigma_pi_orders)
+            print(
+                f"Dim={dim}  sigma_pi=[{orders_str}]  ({sigma_tag})  "
+                f"RMSE={m['rmse']:.4f}  STD_err={m['std_err']:.4f}  MAE={m['mae']:.4f}  "
+                f"R2_COD={m['r2_cod']:.4f}  Pearson_R2={m['pearson_r2']:.4f}",
+            )
+
+            if save and summary_path:
+                y_true = np.asarray(test_labels).ravel()
+                y_pred = np.asarray(pred).ravel()
+                pred_path = os.path.join(
+                    args.save_results, f'predictions_dim{dim}_{sigma_tag}.csv',
+                )
+                with open(pred_path, 'w', newline='') as f:
+                    w = csv.writer(f)
+                    w.writerow(['y_true', 'y_pred', 'error'])
+                    for yt, yp in zip(y_true, y_pred):
+                        w.writerow([f'{yt:.6f}', f'{yp:.6f}', f'{yt - yp:.6f}'])
+
+                with open(summary_path, 'a', newline='') as f:
+                    csv.DictWriter(f, fieldnames=summary_fields).writerow({
+                        'dim': dim,
+                        'sigma_pi': f'[{orders_str}]',
+                        'sigma_tag': sigma_tag,
+                        'seed': seed,
+                        'RMSE': f'{m["rmse"]:.6f}',
+                        'STD_err': f'{m["std_err"]:.6f}',
+                        'MAE': f'{m["mae"]:.6f}',
+                        'R2_COD': f'{m["r2_cod"]:.6f}',
+                        'Pearson_R2': f'{m["pearson_r2"]:.6f}',
+                        'Pearson_R': f'{m["pearson_r"]:.6f}',
+                    })
+                print(f"  Saved predictions to {pred_path}")
+
+
 def run_gvfa_ridge_one_split(args, train_data, eval_data, device, fold_label=""):
     """
     Train on train_data, evaluate on eval_data (val fold).
@@ -80,7 +200,7 @@ def run_gvfa_ridge_one_split(args, train_data, eval_data, device, fold_label="")
     Returns list of {dim, sigma_tag, sigma_pi, **compute_metrics}.
     """
     seed = args.seed
-    dims = [int(x) for x in args.dims.replace(' ', '').split(',')]
+    dims = _dims_list(args)
     sigma_configs = _parse_sigma_pi_arg(args.sigma_pi)
 
     save = args.save_results is not None
@@ -231,6 +351,14 @@ def parse_args():
         '--save_results', type=str, default=None,
         help='Directory for per-fold CSV summary and predictions',
     )
+    p.add_argument(
+        '--test_csv', type=str, default='final_data/testset_novel.csv',
+        help='Test CSV (SMILES, logS) for evaluation after k-fold (full-train model).',
+    )
+    p.add_argument(
+        '--no_test', action='store_true',
+        help='Skip test-set evaluation after cross-validation.',
+    )
     return p.parse_args()
 
 
@@ -246,6 +374,19 @@ def main():
     print(f"CSV: {args.train_csv}")
     print(f"Shuffle seed (KFold): {args.cv_seed}")
     print(f"Seeds (GVFA): {seeds}")
+
+    test_data = None
+    if not args.no_test:
+        if not os.path.isfile(args.test_csv):
+            raise FileNotFoundError(
+                f"Test CSV not found: {args.test_csv!r} "
+                f"(use --no_test to skip, or set --test_csv)",
+            )
+        test_df = pd.read_csv(args.test_csv).dropna(subset=['SMILES', 'logS'])
+        test_data = ZINCLikeCSV(test_df, smiles_col='SMILES', target_col='logS')
+        print(f"Test evaluation: {args.test_csv} ({len(test_df)} molecules)")
+    else:
+        print("Test evaluation: skipped (--no_test)")
 
     kf = KFold(
         n_splits=args.k_folds, shuffle=True, random_state=args.cv_seed,
@@ -331,6 +472,26 @@ def main():
                 f"R2_COD={np.mean(r2s):.4f}±{np.std(r2s):.4f}  "
                 f"Pearson_R2={np.mean(pr2s):.4f}±{np.std(pr2s):.4f}",
             )
+
+        if test_data is not None:
+            full_train_data = ZINCLikeCSV(
+                train_df, smiles_col='SMILES', target_col='logS',
+            )
+            print("\n" + "=" * 80)
+            print(f"SEED = {seed}")
+            print("=" * 80)
+            print(
+                f"Test set: {args.test_csv}  |  "
+                f"train on full {args.train_csv} ({n} molecules)",
+            )
+
+            orig_save_results = args.save_results
+            if args._save_dir_seed:
+                test_save = os.path.join(args._save_dir_seed, 'test_eval')
+                os.makedirs(test_save, exist_ok=True)
+                args.save_results = test_save
+            run_gvfa_ridge_train_test(args, full_train_data, test_data, device)
+            args.save_results = orig_save_results
 
 
 if __name__ == '__main__':
