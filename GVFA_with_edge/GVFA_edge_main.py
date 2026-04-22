@@ -98,7 +98,12 @@ def parse_args():
     p.add_argument('--batch_size', type=int, default=64)
     p.add_argument('--use_ridge', action='store_true', default=True)
     p.add_argument('--no_ridge', action='store_false', dest='use_ridge')
-    p.add_argument('--seed', type=int, default=42, help='RNG seed (PyTorch, NumPy, Python, VSA/edge init, XGB; train/test split when dataset=old)')
+    p.add_argument('--seed', type=int, default=42, help='RNG seed when --seeds is not set')
+    p.add_argument(
+        '--seeds', type=str, default=None,
+        help='Comma-separated RNG seeds; runs a full eval per seed (VSA, model, metrics). '
+             'If omitted, a single run uses --seed. Train/test split for dataset=old also uses each seed.',
+    )
     p.add_argument(
         '--sigma_pi',
         type=str,
@@ -201,9 +206,10 @@ def run_gvfa_ridge(args, train_data, test_data, device):
                 f"R2_COD={m['r2_cod']:.4f}  Pearson_R2={m['pearson_r2']:.4f}",
             )
             if args.export_analysis_dir:
-                sub = os.path.join(
-                    args.export_analysis_dir, f"ridge_dim_{dim}_sigma_{sigma_tag}",
-                )
+                export_base = args.export_analysis_dir
+                if getattr(args, "multi_seed", False):
+                    export_base = os.path.join(export_base, f"seed_{seed}")
+                sub = os.path.join(export_base, f"ridge_dim_{dim}_sigma_{sigma_tag}")
                 export_hypervector_analysis(
                     model_eq1, train_graphs, device, sub, "train", args.batch_size,
                 )
@@ -219,10 +225,23 @@ def run_gvfa_ridge(args, train_data, test_data, device):
 
 def main():
     args = parse_args()
+    if args.seeds:
+        seed_list = [int(x.strip()) for x in args.seeds.split(",") if x.strip() != ""]
+        if not seed_list:
+            raise SystemExit("No valid integers in --seeds (use e.g. --seeds 0,1,2,3,4)")
+    else:
+        seed_list = [args.seed]
+    args.multi_seed = len(seed_list) > 1
+
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print("Running for dataset: ", args.dataset)
-    train_data, test_data = load_data(dataset=args.dataset, seed=args.seed)
-    run_gvfa_ridge(args, train_data, test_data, device)
+    if args.multi_seed:
+        print("Seeds: ", seed_list)
+    for seed in seed_list:
+        args.seed = seed
+        print(f"\n========== SEED {seed} ==========")
+        train_data, test_data = load_data(dataset=args.dataset, seed=seed)
+        run_gvfa_ridge(args, train_data, test_data, device)
 
 
 if __name__ == '__main__':

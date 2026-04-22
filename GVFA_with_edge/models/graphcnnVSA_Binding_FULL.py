@@ -172,8 +172,8 @@ class GraphCNN(nn.Module):
         result = ifft(product, dim=1)
 
         # Real part, then L2-normalize per row (standard VSA practice after binding)
-        result = torch.real(result)
-        return F.normalize(result, p=2, dim=1, eps=eps)
+        return torch.real(result)
+        # return F.normalize(result, p=2, dim=1, eps=eps)
 
     def permute_hv(self, x, shift=1):
         """Cyclic permutation to encode structural/temporal relationships (P_bef in Gayler 2023)."""
