@@ -424,6 +424,7 @@ class GraphCNN(nn.Module):
         if batched_ei is not None and batched_ea is not None and self.edge_feat_dim > 0 and hasattr(self, "W_edge"):
             edge_index = batched_ei
             edge_H = torch.mm(batched_ea.to(X_concat.dtype), self.W_edge)
+            edge_H = F.normalize(edge_H, p=2, dim=1)
 
         hidden_rep = [X_concat]
         h = X_concat

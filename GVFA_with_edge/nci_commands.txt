@@ -19,4 +19,12 @@ python GVFA_edge_main.py --seeds 0,1,2,3,4
 python GVFA_edge_main.py --seed 99
 python GVFA_edge_main.py --seeds 42
 
-python GVFA_edge_main.py --seeds 0,1,2,3,4 --sigma_pi "0,1"
+
+NCI commands
+python GVFA_edge_main.py --seeds 0,1,2,3,4 --sigma_pi "0,1,2" --dims 5000
+
+qsub -I  -l walltime=10:00:00,mem=8GB,ncpus=5,jobfs=4GB -P mi23 -l storage=gdata/jq77+scratch/
+jq77+scratch/mi23
+module load python3/3.8.5
+cd /g/data/jq77/nuwan/Molecular_Solubility/GVFA_with_edge/
+. /scratch/jq77/nk8155/env1/bin/activate
