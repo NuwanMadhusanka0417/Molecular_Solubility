@@ -125,25 +125,18 @@ class GraphCNN(nn.Module):
         batched_ea = torch.cat(ea_list, dim=0)
         return batched_ei, batched_ea, start_idx
 
-    def _edge_message_pool(self, h_to_pool, edge_index, edge_H, num_nodes, average=False):
+    def _edge_message_pool(self, h_to_pool, edge_index, edge_H, num_nodes):
         """
-        Edge-conditioned message passing: for each edge (src, dst), message = bind(h_to_pool[src], edge_H[e]),
-        then aggregate at dst. Caller passes rotated or plain h as h_to_pool. Physically: combine
-        neighbour atom with the bond along that edge, send message along that bond.
+        Edge-conditioned message passing: bind per edge, sum messages at dst, then L2-normalize per node.
+        (Mean is redundant before L2: sum and mean are parallel, so F.normalize(sum) == F.normalize(mean).)
         """
-        E = edge_index.shape[1]
-        D = h_to_pool.shape[1]
         src, dst = edge_index[0], edge_index[1]
         neighbor_h = h_to_pool[src]
         messages = self.bind(neighbor_h, edge_H)
+        D = h_to_pool.shape[1]
         pooled = torch.zeros(num_nodes, D, device=h_to_pool.device, dtype=h_to_pool.dtype)
         pooled.index_add_(0, dst, messages)
-        if average:
-            degree = torch.zeros(num_nodes, 1, device=h_to_pool.device, dtype=h_to_pool.dtype)
-            degree.index_add_(0, dst.unsqueeze(1), torch.ones(E, 1, device=h_to_pool.device, dtype=h_to_pool.dtype))
-            degree = degree.clamp(min=1.0)
-            pooled = pooled / degree
-        return pooled
+        return F.normalize(pooled, p=2, dim=1)
 
     def maxpool(self, h, padded_neighbor_list):
         ###Element-wise minimum will never affect max-pooling
@@ -171,9 +164,9 @@ class GraphCNN(nn.Module):
         # Perform inverse FFT to get back to the spatial domain
         result = ifft(product, dim=1)
 
-        # Real part, then L2-normalize per row (standard VSA practice after binding)
+        # Real part only; L2 is applied after bundling (sums), not after binding.
         result = torch.real(result)
-        return result #F.normalize(result, p=2, dim=1, eps=eps)
+        return result
 
     def permute_hv(self, x, shift=1):
         """Cyclic permutation to encode structural/temporal relationships (P_bef in Gayler 2023)."""
@@ -238,7 +231,6 @@ class GraphCNN(nn.Module):
                 ast_t = F1
             else:
                 ast_t = self.bind(self._pi(ast_prev, shift=max(1, D // 3)), F1)
-                ast_t = F.normalize(ast_t, p=2, dim=1, eps=eps)
             ast_prev = ast_t
 
             if t in wanted:
@@ -274,6 +266,8 @@ class GraphCNN(nn.Module):
         if self.graph_pooling_type == "sum":
             g_mean = g_mean / num_nodes
             g_mean_sq = g_mean_sq / num_nodes
+        g_mean = F.normalize(g_mean, p=2, dim=1, eps=eps)
+        g_mean_sq = F.normalize(g_mean_sq, p=2, dim=1, eps=eps)
         g = torch.cat([g_mean, g_max, g_mean_sq], dim=1)
         return g
 
@@ -333,16 +327,12 @@ class GraphCNN(nn.Module):
     def _pool_neighbors(self, h_pool, Adj_block, padded_neighbor_list, edge_index, edge_H, num_nodes):
         """Dispatch to edge-conditioned pool or adjacency-based pool."""
         use_edges = edge_index is not None and edge_H is not None and num_nodes is not None
-        avg = (self.neighbor_pooling_type == "average")
         if use_edges:
-            return self._edge_message_pool(h_pool, edge_index, edge_H, num_nodes, average=avg)
+            return self._edge_message_pool(h_pool, edge_index, edge_H, num_nodes)
         if self.neighbor_pooling_type == "max":
             return self.maxpool(h_pool, padded_neighbor_list)
         pooled = torch.spmm(Adj_block, h_pool)
-        if avg:
-            degree = torch.spmm(Adj_block, torch.ones((Adj_block.shape[0], 1)).to(self.device))
-            pooled = pooled / degree
-        return pooled
+        return F.normalize(pooled, p=2, dim=1)
 
     def next_layer_eps(self, h, layer, padded_neighbor_list=None, Adj_block=None, delta=1, equation=10,
                        edge_index=None, edge_H=None, num_nodes=None, return_pre_sign=False):
@@ -389,6 +379,7 @@ class GraphCNN(nn.Module):
             pooled = torch.roll(pooled, shifts=shift, dims=1)
             
 
+        pooled = F.normalize(pooled, p=2, dim=1)
         pre_bin = pooled
         # print(pooled)
         pooled = torch.sign(pooled)
@@ -424,6 +415,7 @@ class GraphCNN(nn.Module):
         if batched_ei is not None and batched_ea is not None and self.edge_feat_dim > 0 and hasattr(self, "W_edge"):
             edge_index = batched_ei
             edge_H = torch.mm(batched_ea.to(X_concat.dtype), self.W_edge)
+            edge_H = F.normalize(edge_H, p=2, dim=1)
 
         hidden_rep = [X_concat]
         h = X_concat
@@ -508,7 +500,7 @@ class GraphCNN(nn.Module):
         pooled_hS = []
         for layer, h in enumerate(hidden_rep):
             pooled_h = torch.spmm(graph_pool, h)
-            pooled_hS.append(pooled_h)
+            pooled_hS.append(F.normalize(pooled_h, p=2, dim=1))
         return torch.stack(pooled_hS, dim=0)
 
     

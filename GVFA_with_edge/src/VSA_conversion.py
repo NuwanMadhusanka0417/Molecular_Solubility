@@ -103,7 +103,7 @@ def project_with_vsa(g_list, new_dim, projection_type="orthogonal", seed=0):
     for g in g_list:
         X = g.node_features  # [N, F_node]
         node_H = torch.matmul(X, W_node)  # [N, D]
-        g.node_features = node_H
+        g.node_features = F.normalize(node_H, p=2, dim=1)
 
     print("g list item shape after VSA:", g_list[0].node_features.shape)
     return g_list
