@@ -51,6 +51,14 @@ def vsa_message_passing(node_H, edge_H, edge_index, alpha=1.0):
 
     return updated
 
+def get_feature_stats(g_list):
+    """Compute per-feature mean and std across all nodes in g_list (training set)."""
+    all_features = torch.cat([g.node_features for g in g_list], dim=0)
+    mean = all_features.mean(dim=0, keepdim=True)
+    std = all_features.std(dim=0, keepdim=True).clamp(min=1e-6)
+    return mean, std
+
+
 def _random_projection_matrix(in_dim, out_dim, orthogonal=False, seed=0):
     """
     Build shared random projection W: (in_dim, out_dim).
@@ -81,34 +89,36 @@ def _random_projection_matrix(in_dim, out_dim, orthogonal=False, seed=0):
     return W
 
 
-def project_with_vsa(g_list, new_dim, projection_type="orthogonal", seed=0):
+def project_with_vsa(g_list, new_dim, projection_type="orthogonal", seed=0,
+                     feat_mean=None, feat_std=None):
     """
-    Project node features to hypervectors only.
-
-    Edge conditioning is done solely in GraphCNN (single projection + FFT binding)
-    so edge_attr is not projected or used here.
-
-    projection_type: "orthogonal" (default) = orthonormal random projection, better
-        preserves norms and distances; "gaussian" = standard JL-style random projection.
-    seed: controls the random projection matrix (same seed => same W across train/test).
+    Project node features to hypervectors.
+    Features are z-score standardized across the full dataset (or via feat_mean/feat_std)
+    before projection so no single feature dimension dominates the HV direction.
     """
     torch.manual_seed(seed)
     F_node = g_list[0].node_features.shape[1]
     use_orthogonal = projection_type == "orthogonal"
     W_node = _random_projection_matrix(F_node, new_dim, orthogonal=use_orthogonal, seed=seed)
 
+    if feat_mean is None or feat_std is None:
+        all_features = torch.cat([g.node_features for g in g_list], dim=0)
+        feat_mean = all_features.mean(dim=0, keepdim=True)
+        feat_std = all_features.std(dim=0, keepdim=True).clamp(min=1e-6)
+
     print("VSA_conversion: node feature dim =", F_node, "new_dim =", new_dim,
           "projection =", projection_type)
 
     for g in g_list:
-        X = g.node_features  # [N, F_node]
-        node_H = torch.matmul(X, W_node)  # [N, D]
+        X_norm = (g.node_features - feat_mean) / feat_std
+        node_H = torch.matmul(X_norm, W_node)
         g.node_features = F.normalize(node_H, p=2, dim=1)
 
     print("g list item shape after VSA:", g_list[0].node_features.shape)
     return g_list
 
-def VSA_conversion(g_list, new_dim=None, projection_type="orthogonal", seed=0):
+def VSA_conversion(g_list, new_dim=None, projection_type="orthogonal", seed=0,
+                   feat_mean=None, feat_std=None):
     """
     Build neighbors & edge_mat for GraphCNN. If new_dim is set, project node
     features to HVs only (edge conditioning is done solely in GraphCNN).
@@ -139,7 +149,10 @@ def VSA_conversion(g_list, new_dim=None, projection_type="orthogonal", seed=0):
     if not new_dim:
         return g_list
 
-    g_list = project_with_vsa(g_list, new_dim, projection_type=projection_type, seed=seed)
+    g_list = project_with_vsa(
+        g_list, new_dim, projection_type=projection_type, seed=seed,
+        feat_mean=feat_mean, feat_std=feat_std,
+    )
     return g_list
 '''
 def project_node_features(g_list, original_feature_dim, new_dim):

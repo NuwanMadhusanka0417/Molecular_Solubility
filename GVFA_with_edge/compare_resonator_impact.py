@@ -9,7 +9,7 @@ Expected: 5-15% improvement in MAE/RMSE with resonator consensus.
 
 from src.create_graphs import create_graph_list
 from src.load_data import load_data
-from src.VSA_conversion import VSA_conversion
+from src.VSA_conversion import VSA_conversion, get_feature_stats
 from src.embeddings import getEmbedding
 from models.graphcnnVSA_Binding_FULL import GraphCNN
 import torch
@@ -21,11 +21,15 @@ def run_eval(use_resonator, dim=5000):
     train_data, test_data = load_data()
     train_graphs = create_graph_list(train_data)
     test_graphs = create_graph_list(test_data)
-    ts_graph = test_graphs.copy()
-    tr_graph = train_graphs.copy()
-
-    test_HVs = VSA_conversion(ts_graph, dim, projection_type="orthogonal")
-    train_HVs = VSA_conversion(tr_graph, dim, projection_type="orthogonal")
+    train_feat_mean, train_feat_std = get_feature_stats(train_graphs)
+    test_HVs = VSA_conversion(
+        test_graphs, dim, projection_type="orthogonal",
+        feat_mean=train_feat_mean, feat_std=train_feat_std,
+    )
+    train_HVs = VSA_conversion(
+        train_graphs, dim, projection_type="orthogonal",
+        feat_mean=train_feat_mean, feat_std=train_feat_std,
+    )
 
     model = GraphCNN(
         test_HVs[0].node_features.shape[1], num_layers=5, delta=1,

@@ -10,6 +10,7 @@ After CV, optionally trains on the full training CSV and evaluates on a held-out
 (same print format as GVFA_edge_main: Dim=... RMSE=... STD_err=...). No import from main.
 """
 import argparse
+import copy
 import csv
 import os
 import random
@@ -23,7 +24,7 @@ from sklearn.model_selection import KFold
 
 from src.create_graphs import create_graph_list
 from src.load_data import ZINCLikeCSV
-from src.VSA_conversion import VSA_conversion
+from src.VSA_conversion import VSA_conversion, get_feature_stats
 from src.embeddings import getEmbedding
 from models.graphcnnVSA_Binding_FULL import GraphCNN
 
@@ -101,6 +102,10 @@ def run_gvfa_ridge_train_test(args, train_data, test_data, device):
         with open(summary_path, 'w', newline='') as f:
             csv.DictWriter(f, fieldnames=summary_fields).writeheader()
 
+    base_train_graphs = create_graph_list(train_data)
+    base_test_graphs = create_graph_list(test_data)
+    train_feat_mean, train_feat_std = get_feature_stats(base_train_graphs)
+
     for dim in dims:
         random.seed(seed)
         np.random.seed(seed)
@@ -108,13 +113,15 @@ def run_gvfa_ridge_train_test(args, train_data, test_data, device):
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(seed)
 
-        train_graphs = create_graph_list(train_data)
-        test_graphs = create_graph_list(test_data)
+        train_graphs = copy.deepcopy(base_train_graphs)
+        test_graphs = copy.deepcopy(base_test_graphs)
         test_HVs = VSA_conversion(
-            test_graphs.copy(), dim, projection_type="orthogonal", seed=seed,
+            test_graphs, dim, projection_type="orthogonal", seed=seed,
+            feat_mean=train_feat_mean, feat_std=train_feat_std,
         )
         train_HVs = VSA_conversion(
-            train_graphs.copy(), dim, projection_type="orthogonal", seed=seed,
+            train_graphs, dim, projection_type="orthogonal", seed=seed,
+            feat_mean=train_feat_mean, feat_std=train_feat_std,
         )
 
         for sigma_pi_orders, sigma_tag in sigma_configs:
@@ -218,6 +225,10 @@ def run_gvfa_ridge_one_split(args, train_data, eval_data, device, fold_label="")
 
     results_out = []
 
+    base_train_graphs = create_graph_list(train_data)
+    base_eval_graphs = create_graph_list(eval_data)
+    train_feat_mean, train_feat_std = get_feature_stats(base_train_graphs)
+
     for dim in dims:
         random.seed(seed)
         np.random.seed(seed)
@@ -225,13 +236,15 @@ def run_gvfa_ridge_one_split(args, train_data, eval_data, device, fold_label="")
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(seed)
 
-        train_graphs = create_graph_list(train_data)
-        eval_graphs = create_graph_list(eval_data)
+        train_graphs = copy.deepcopy(base_train_graphs)
+        eval_graphs = copy.deepcopy(base_eval_graphs)
         eval_HVs = VSA_conversion(
-            eval_graphs.copy(), dim, projection_type="orthogonal", seed=seed,
+            eval_graphs, dim, projection_type="orthogonal", seed=seed,
+            feat_mean=train_feat_mean, feat_std=train_feat_std,
         )
         train_HVs = VSA_conversion(
-            train_graphs.copy(), dim, projection_type="orthogonal", seed=seed,
+            train_graphs, dim, projection_type="orthogonal", seed=seed,
+            feat_mean=train_feat_mean, feat_std=train_feat_std,
         )
 
         for sigma_pi_orders, sigma_tag in sigma_configs:
