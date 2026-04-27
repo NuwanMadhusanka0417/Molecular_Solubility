@@ -179,11 +179,12 @@ def run_gvfa_ridge(args, train_data, test_data, device):
 
         train_graphs = create_graph_list(train_data)
         test_graphs = create_graph_list(test_data)
-        test_HVs = VSA_conversion(
-            test_graphs.copy(), dim, projection_type="orthogonal", seed=seed,
-        )
-        train_HVs = VSA_conversion(
+        train_HVs, node_feat_mean, node_feat_std = VSA_conversion(
             train_graphs.copy(), dim, projection_type="orthogonal", seed=seed,
+        )
+        test_HVs, _, _ = VSA_conversion(
+            test_graphs.copy(), dim, projection_type="orthogonal", seed=seed,
+            feature_mean=node_feat_mean, feature_std=node_feat_std,
         )
 
         for sigma_pi_orders, sigma_tag in sigma_configs:
@@ -197,6 +198,20 @@ def run_gvfa_ridge(args, train_data, test_data, device):
                 use_reservoir=True, hop_decay=0.85, sigma_pi_orders=sigma_pi_orders,
                 rng_seed=seed,
             )
+            _edge_attrs = []
+            for g in train_HVs:
+                if g.edge_attr is not None and g.edge_attr.numel() > 0:
+                    _edge_attrs.append(g.edge_attr.to(torch.float32))
+            if _edge_attrs:
+                all_edge_feats = torch.cat(_edge_attrs, dim=0)
+                edge_mean = all_edge_feats.mean(dim=0)
+                edge_std = all_edge_feats.std(dim=0).clamp(min=1e-6)
+                model_eq1.set_edge_stats(edge_mean, edge_std)
+                print(f"  [Edge Standardization] Fitted on {all_edge_feats.shape[0]} "
+                      f"training edges. Bond-length mean: {edge_mean[3]:.4f} Å, "
+                      f"std: {edge_std[3]:.4f}")
+            else:
+                print("  [Edge Standardization] No edge attrs found; skipping.")
             train_emb, train_labels = getEmbedding(
                 model_eq1, device, train_HVs, use_size_aware=True, hop_alpha=1.0,
             )

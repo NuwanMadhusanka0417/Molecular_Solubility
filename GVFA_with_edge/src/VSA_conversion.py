@@ -81,16 +81,17 @@ def _random_projection_matrix(in_dim, out_dim, orthogonal=False, seed=0):
     return W
 
 
-def project_with_vsa(g_list, new_dim, projection_type="orthogonal", seed=0):
+def project_with_vsa(g_list, new_dim, projection_type="orthogonal", seed=0,
+                     feature_mean=None, feature_std=None):
     """
-    Project node features to hypervectors only.
+    Project node features to hypervectors, with optional pre-projection standardization.
 
-    Edge conditioning is done solely in GraphCNN (single projection + FFT binding)
-    so edge_attr is not projected or used here.
+    If feature_mean and feature_std are None, computes them from the current g_list
+    (training mode). Otherwise applies the provided stats (test mode).
 
-    projection_type: "orthogonal" (default) = orthonormal random projection, better
-        preserves norms and distances; "gaussian" = standard JL-style random projection.
-    seed: controls the random projection matrix (same seed => same W across train/test).
+    Returns: (g_list, feature_mean, feature_std)
+        feature_mean, feature_std: torch.Tensor [F_node] — always returned so callers
+        can pass train stats to test projection.
     """
     torch.manual_seed(seed)
     F_node = g_list[0].node_features.shape[1]
@@ -100,21 +101,37 @@ def project_with_vsa(g_list, new_dim, projection_type="orthogonal", seed=0):
     print("VSA_conversion: node feature dim =", F_node, "new_dim =", new_dim,
           "projection =", projection_type)
 
+    # --- Standardization ---
+    if feature_mean is None:
+        # Training pass: compute mean and std from all nodes across all graphs
+        all_X = torch.cat([g.node_features for g in g_list], dim=0)  # [N_total, F]
+        feature_mean = all_X.mean(dim=0)                              # [F]
+        feature_std = all_X.std(dim=0).clamp(min=1e-6)              # [F], avoid /0
+        print(f"  [Standardization] Computed from training data. "
+              f"Mean range: [{feature_mean.min():.4f}, {feature_mean.max():.4f}]  "
+              f"Std range: [{feature_std.min():.4f}, {feature_std.max():.4f}]")
+    else:
+        print("  [Standardization] Applying pre-computed train stats to test data.")
+
     for g in g_list:
-        X = g.node_features  # [N, F_node]
-        node_H = torch.matmul(X, W_node)  # [N, D]
-        g.node_features = node_H
+        X = (g.node_features - feature_mean) / feature_std  # standardize
+        g.node_features = torch.matmul(X, W_node)           # project to HV space
 
     print("g list item shape after VSA:", g_list[0].node_features.shape)
-    return g_list
+    return g_list, feature_mean, feature_std
 
-def VSA_conversion(g_list, new_dim=None, projection_type="orthogonal", seed=0):
+
+def VSA_conversion(g_list, new_dim=None, projection_type="orthogonal", seed=0,
+                   feature_mean=None, feature_std=None):
     """
     Build neighbors & edge_mat for GraphCNN. If new_dim is set, project node
-    features to HVs only (edge conditioning is done solely in GraphCNN).
+    features to HVs with optional pre-projection standardization.
 
-    projection_type: "orthogonal" (info-preserving) or "gaussian".
-    seed: passed to node projection when new_dim is set.
+    feature_mean, feature_std: if None, computed from g_list (training).
+        Pass training stats here for test data to avoid data leakage.
+
+    Returns: (g_list, feature_mean, feature_std)
+        feature_mean/std are None if new_dim is None (no projection done).
     """
     # Build neighbors and edge_mat; use edge_index when available (aligns with edge_attr)
     for g in g_list:
@@ -135,73 +152,11 @@ def VSA_conversion(g_list, new_dim=None, projection_type="orthogonal", seed=0):
             else:
                 g.edge_mat = torch.zeros((2, 0), dtype=torch.long)
 
-    # If no projection requested, just return graphs as-is
     if not new_dim:
-        return g_list
+        return g_list, None, None
 
-    g_list = project_with_vsa(g_list, new_dim, projection_type=projection_type, seed=seed)
-    return g_list
-'''
-def project_node_features(g_list, original_feature_dim, new_dim):
-    # Set a random seed for reproducibility
-    torch.manual_seed(0)
-    # Generate a random projection matrix
-    # R = np.random.randn(original_feature_dim, new_dim) / np.sqrt(new_dim)
-    # Initialize a random weight matrix for projection
-    W = torch.randn(original_feature_dim, new_dim) / np.sqrt(new_dim)
-    # print("W : ", W.shape)
-    # Project node features for each graph
-
-    print("g list item shape before : ", g_list[0].node_features.shape)
-    for g in g_list:
-        # Assuming g.node_features is a torch.Tensor
-        if g.node_features is not None:
-            # print(g.node_features)
-            g.node_features  = torch.matmul(g.node_features, W)
-            # print("new g.node_features : ",g.node_features.shape)
-    print("g list item shape after : ", g_list[0].node_features.shape)
-    return g_list
-
-def VSA_conversion(g_list, new_dim=None):
-    # Add labels and edge_mat
-    for g in g_list:
-        g.neighbors = [[] for _ in range(len(g.g))]
-
-        # Build neighbors list
-        for i, j in g.g.edges():
-            g.neighbors[i].append(j)
-            g.neighbors[j].append(i)
-
-        # Compute max degree
-        degree_list = [len(g.neighbors[i]) for i in range(len(g.g))]
-        g.max_neighbor = max(degree_list)
-
-        # Create edge matrix
-        edges = [list(pair) for pair in g.g.edges()]
-        edges.extend([[j, i] for i, j in edges])
-        g.edge_mat = torch.LongTensor(edges).transpose(0, 1)
-
-    #Extracting unique tag labels
-    # tagset = set([])
-    # for g in g_list:
-    #     tagset = tagset.union(set(g.node_tags))
-
-    # tagset = list(tagset)
-    # tag2index = {tagset[i]:i for i in range(len(tagset))}
-
-
-    ########## This part make one hit encoding of each node as they contain different atoms
-    # for g in g_list:
-    #     g.node_features = torch.zeros(len(g.node_tags), len(tagset))
-    #     g.node_features[range(len(g.node_tags)), [tag2index[tag] for tag in g.node_tags]] = 1
-            # hypervector[range(len(g.node_tags)), [tag2index[tag] for tag in node_tags if tag in tag2index]] = 1
-
-    original_feature_dim = len(g_list[0].node_features[0])# len(tagset)
-    # print(len(tagset))
-    print("VSA_conversion",len(g_list[0].node_features[0]))
-
-
-    if new_dim:
-        g_list = project_node_features(g_list, original_feature_dim, new_dim)
-    return g_list
-    '''
+    g_list, feature_mean, feature_std = project_with_vsa(
+        g_list, new_dim, projection_type=projection_type, seed=seed,
+        feature_mean=feature_mean, feature_std=feature_std,
+    )
+    return g_list, feature_mean, feature_std

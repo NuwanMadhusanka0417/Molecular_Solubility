@@ -24,15 +24,28 @@ def run_eval(use_resonator, dim=5000):
     ts_graph = test_graphs.copy()
     tr_graph = train_graphs.copy()
 
-    test_HVs = VSA_conversion(ts_graph, dim, projection_type="orthogonal")
-    train_HVs = VSA_conversion(tr_graph, dim, projection_type="orthogonal")
+    train_HVs, node_feat_mean, node_feat_std = VSA_conversion(
+        tr_graph, dim, projection_type="orthogonal", seed=42,
+    )
+    test_HVs, _, _ = VSA_conversion(
+        ts_graph, dim, projection_type="orthogonal", seed=42,
+        feature_mean=node_feat_mean, feature_std=node_feat_std,
+    )
 
     model = GraphCNN(
         test_HVs[0].node_features.shape[1], num_layers=5, delta=1,
         graph_pooling_type="sum", neighbor_pooling_type="sum", device=torch.device("cpu"),
         equation=10, edge_feat_dim=5, edge_projection_type="orthogonal",
         use_resonator=use_resonator, resonator_iters=7, resonator_beta=0.75,
+        rng_seed=42,
     )
+    _edge_attrs = []
+    for g in train_HVs:
+        if g.edge_attr is not None and g.edge_attr.numel() > 0:
+            _edge_attrs.append(g.edge_attr.to(torch.float32))
+    if _edge_attrs:
+        all_edge_feats = torch.cat(_edge_attrs, dim=0)
+        model.set_edge_stats(all_edge_feats.mean(dim=0), all_edge_feats.std(dim=0).clamp(min=1e-6))
 
     train_emb, train_labels = getEmbedding(
         model, torch.device("cpu"), train_HVs, use_size_aware=True, hop_alpha=0.8

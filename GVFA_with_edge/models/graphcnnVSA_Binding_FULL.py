@@ -50,6 +50,19 @@ class GraphCNN(nn.Module):
             else:
                 W_edge = W_edge / math.sqrt(self.edge_feat_dim)
             self.register_buffer("W_edge", W_edge)
+        # Edge feature standardization stats; set with set_edge_stats() from training edges
+        self.edge_feat_mean = None
+        self.edge_feat_std = None
+
+    def set_edge_stats(self, edge_mean: torch.Tensor, edge_std: torch.Tensor):
+        """
+        Store training-set edge feature statistics for standardization in forward().
+
+        edge_mean: [F_edge] — mean of each edge feature over all training edges.
+        edge_std:  [F_edge] — std of each edge feature (clamped ≥ 1e-6 when fit).
+        """
+        self.register_buffer("edge_feat_mean", edge_mean.to(self.device).clone())
+        self.register_buffer("edge_feat_std", edge_std.to(self.device).clone())
 
     def __preprocess_neighbors_sumavepool(self, batch_graph):
         ###create block diagonal sparse matrix
@@ -423,7 +436,10 @@ class GraphCNN(nn.Module):
         edge_H = None
         if batched_ei is not None and batched_ea is not None and self.edge_feat_dim > 0 and hasattr(self, "W_edge"):
             edge_index = batched_ei
-            edge_H = torch.mm(batched_ea.to(X_concat.dtype), self.W_edge)
+            ea = batched_ea.to(X_concat.dtype)
+            if self.edge_feat_mean is not None and self.edge_feat_std is not None:
+                ea = (ea - self.edge_feat_mean) / self.edge_feat_std
+            edge_H = torch.mm(ea, self.W_edge)
 
         hidden_rep = [X_concat]
         h = X_concat
