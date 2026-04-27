@@ -50,9 +50,7 @@ class GraphCNN(nn.Module):
             else:
                 W_edge = W_edge / math.sqrt(self.edge_feat_dim)
             self.register_buffer("W_edge", W_edge)
-        # Edge feature standardization stats; set with set_edge_stats() from training edges
-        self.edge_feat_mean = None
-        self.edge_feat_std = None
+        # Edge stats: do not pre-assign edge_feat_mean/std — plain attributes block register_buffer in set_edge_stats.
 
     def set_edge_stats(self, edge_mean: torch.Tensor, edge_std: torch.Tensor):
         """
@@ -61,8 +59,14 @@ class GraphCNN(nn.Module):
         edge_mean: [F_edge] — mean of each edge feature over all training edges.
         edge_std:  [F_edge] — std of each edge feature (clamped ≥ 1e-6 when fit).
         """
-        self.register_buffer("edge_feat_mean", edge_mean.to(self.device).clone())
-        self.register_buffer("edge_feat_std", edge_std.to(self.device).clone())
+        em = edge_mean.to(self.device).clone()
+        es = edge_std.to(self.device).clone()
+        if "edge_feat_mean" in self._buffers:
+            self.edge_feat_mean = em
+            self.edge_feat_std = es
+        else:
+            self.register_buffer("edge_feat_mean", em)
+            self.register_buffer("edge_feat_std", es)
 
     def __preprocess_neighbors_sumavepool(self, batch_graph):
         ###create block diagonal sparse matrix
@@ -437,7 +441,7 @@ class GraphCNN(nn.Module):
         if batched_ei is not None and batched_ea is not None and self.edge_feat_dim > 0 and hasattr(self, "W_edge"):
             edge_index = batched_ei
             ea = batched_ea.to(X_concat.dtype)
-            if self.edge_feat_mean is not None and self.edge_feat_std is not None:
+            if "edge_feat_mean" in self._buffers and "edge_feat_std" in self._buffers:
                 ea = (ea - self.edge_feat_mean) / self.edge_feat_std
             edge_H = torch.mm(ea, self.W_edge)
 
