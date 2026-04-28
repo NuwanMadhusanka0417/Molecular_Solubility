@@ -95,27 +95,42 @@ def project_with_vsa(g_list, new_dim, projection_type="orthogonal", seed=0,
     """
     torch.manual_seed(seed)
     F_node = g_list[0].node_features.shape[1]
+    EXPECTED_NODE_FEAT_DIM = 18  # update if expand_atomic_features in create_graphs.py changes
+    assert F_node == EXPECTED_NODE_FEAT_DIM or feature_mean is not None, (
+        f"Node feature dim is {F_node}, expected {EXPECTED_NODE_FEAT_DIM}. "
+        f"Update CONTINUOUS_COLS in project_with_vsa if features were added."
+    )
     use_orthogonal = projection_type == "orthogonal"
     W_node = _random_projection_matrix(F_node, new_dim, orthogonal=use_orthogonal, seed=seed)
 
     print("VSA_conversion: node feature dim =", F_node, "new_dim =", new_dim,
           "projection =", projection_type)
 
-    # --- Standardization ---
+    # --- Selective standardization: continuous columns only ---
+    # Binary/one-hot columns already live in {0,1} — standardizing them is unnecessary
+    # and harmful when nearly-constant (std ≈ 0 → clamp explosion).
+    # Layout (18 cols from expand_atomic_features in create_graphs.py):
+    #   0 atomic_number       7 formal_charge       12 num_attached_h
+    #   13 gasteiger  14 crippen_logp  15 tpsa_contrib  17 smallest_ring_size
+    CONTINUOUS_COLS = [0, 1, 2, 7, 12, 13, 14, 15, 17]
+
     if feature_mean is None:
-        # Training pass: compute mean and std from all nodes across all graphs
-        all_X = torch.cat([g.node_features for g in g_list], dim=0)  # [N_total, F]
-        feature_mean = all_X.mean(dim=0)                              # [F]
-        feature_std = all_X.std(dim=0).clamp(min=1e-6)              # [F], avoid /0
-        print(f"  [Standardization] Computed from training data. "
-              f"Mean range: [{feature_mean.min():.4f}, {feature_mean.max():.4f}]  "
-              f"Std range: [{feature_std.min():.4f}, {feature_std.max():.4f}]")
+        all_X = torch.cat([g.node_features for g in g_list], dim=0)
+        feature_mean = torch.zeros(F_node, dtype=all_X.dtype)
+        feature_std = torch.ones(F_node, dtype=all_X.dtype)
+        cont = all_X[:, CONTINUOUS_COLS]
+        feature_mean[CONTINUOUS_COLS] = cont.mean(dim=0)
+        feature_std[CONTINUOUS_COLS] = cont.std(dim=0).clamp(min=0.1)
+
+        print("  [Standardization] Selective (continuous cols only).")
+        print(f"    Mean  (cont): {feature_mean[CONTINUOUS_COLS].tolist()}")
+        print(f"    Std   (cont): {feature_std[CONTINUOUS_COLS].tolist()}")
     else:
         print("  [Standardization] Applying pre-computed train stats to test data.")
 
     for g in g_list:
-        X = (g.node_features - feature_mean) / feature_std  # standardize
-        g.node_features = torch.matmul(X, W_node)           # project to HV space
+        X = (g.node_features - feature_mean) / feature_std
+        g.node_features = torch.matmul(X, W_node)
 
     print("g list item shape after VSA:", g_list[0].node_features.shape)
     return g_list, feature_mean, feature_std

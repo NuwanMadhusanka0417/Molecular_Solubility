@@ -198,6 +198,13 @@ def run_gvfa_ridge(args, train_data, test_data, device):
                 use_reservoir=True, hop_decay=0.85, sigma_pi_orders=sigma_pi_orders,
                 rng_seed=seed,
             )
+            # edge_attr stays raw [E, 5]; VSA_conversion only overwrites node_features.
+            _eref = next((g.edge_attr for g in train_HVs if g.edge_attr is not None and g.edge_attr.numel() > 0), None)
+            if _eref is not None:
+                assert _eref.shape[1] == 5, (
+                    f"edge_attr should be raw [E,5] bond features but got shape {_eref.shape}. "
+                    f"VSA_conversion must not modify edge_attr."
+                )
             _edge_attrs = []
             for g in train_HVs:
                 if g.edge_attr is not None and g.edge_attr.numel() > 0:
@@ -205,7 +212,7 @@ def run_gvfa_ridge(args, train_data, test_data, device):
             if _edge_attrs:
                 all_edge_feats = torch.cat(_edge_attrs, dim=0)
                 edge_mean = all_edge_feats.mean(dim=0)
-                edge_std = all_edge_feats.std(dim=0).clamp(min=1e-6)
+                edge_std = all_edge_feats.std(dim=0).clamp(min=0.01)
                 model_eq1.set_edge_stats(edge_mean, edge_std)
                 print(f"  [Edge Standardization] Fitted on {all_edge_feats.shape[0]} "
                       f"training edges. Bond-length mean: {edge_mean[3]:.4f} Å, "

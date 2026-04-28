@@ -57,7 +57,7 @@ class GraphCNN(nn.Module):
         Store training-set edge feature statistics for standardization in forward().
 
         edge_mean: [F_edge] — mean of each edge feature over all training edges.
-        edge_std:  [F_edge] — std of each edge feature (clamped ≥ 1e-6 when fit).
+        edge_std:  [F_edge] — std of each edge feature (caller should clamp, e.g. min 0.01).
         """
         em = edge_mean.to(self.device).clone()
         es = edge_std.to(self.device).clone()

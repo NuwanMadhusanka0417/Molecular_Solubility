@@ -7,8 +7,8 @@ def getEmbedding(model, device, train_graphs, batch_size=100, SUM=True, use_size
     use_size_aware: if True (default), applies two changes to help solubility prediction:
         1) Scale each graph's pooled vector at every layer by 1/√(num_nodes), so larger
            molecules don't dominate the sum-pooled representation.
-        2) Append num_nodes as an extra feature (last column). XGBoost then gets D+1
-           dimensions; the last is atom count, which is important for solubility.
+        2) Append soft-scaled molecule size log1p(num_atoms)/log1p(10) as an extra column
+           (similar scale to bipolar HV dims). Helps solubility without dominating Ridge.
 
     hop_alpha: topologically decaying hop weights. When combining layers, applies
         weights = alpha ** layer_ids so nearer hops (lower layer_id) get higher weight.
@@ -51,14 +51,17 @@ def getEmbedding(model, device, train_graphs, batch_size=100, SUM=True, use_size
         else:
             combined_embedding = torch.cat(output, dim=1)
 
-        # Append num_nodes as extra column so XGBoost gets explicit size feature (D+1 input)
+        # Append scaled num_nodes so it is on a similar scale to bipolar HV dims {-1, +1}
         if use_size_aware:
-            n = torch.tensor(
+            n_raw = torch.tensor(
                 [len(g.g) for g in batch_graphs],
                 dtype=combined_embedding.dtype,
                 device=combined_embedding.device,
+            )
+            n_scaled = (
+                torch.log1p(n_raw) / torch.log1p(torch.tensor(10.0, device=combined_embedding.device, dtype=combined_embedding.dtype))
             ).view(1, -1, 1)
-            combined_embedding = torch.cat([combined_embedding, n], dim=2)  # [1, batch_size, D+1]
+            combined_embedding = torch.cat([combined_embedding, n_scaled], dim=2)  # [1, batch_size, D+1]
 
         combined_embeddings.append(combined_embedding)
         labels = torch.FloatTensor([graph.label for graph in batch_graphs]).to(device)
