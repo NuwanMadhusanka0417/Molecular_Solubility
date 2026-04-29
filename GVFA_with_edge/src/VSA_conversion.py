@@ -1,9 +1,14 @@
 
 import torch
-import numpy as np
 import math
 import torch.nn.functional as F
-# import torch
+
+# Node feature layout [18 cols] — pre-projection maps each column into ~[-1, +1]
+BINARY_COLS = [3, 4, 5, 6, 8, 9, 10, 11, 16]  # {0,1} → {-1,+1}
+MINMAX_COLS = [0, 1, 2, 12, 15, 17]              # min-max on train → [-1,+1]
+TANH_COLS = {7: 1.0, 13: 0.3, 14: 0.5}          # formal_charge, gasteiger, crippen
+
+
 def hv_bind(a, b):
     """
     Hypervector binding for bipolar HVs: elementwise multiplication.
@@ -23,30 +28,23 @@ def vsa_message_passing(node_H, edge_H, edge_index, alpha=1.0):
     N, D = node_H.shape
     E = edge_H.shape[0]
 
-    # accumulate messages for each node
-    messages = torch.zeros_like(node_H)  # [N, D]
+    messages = torch.zeros_like(node_H)
 
     for e in range(E):
         u = int(edge_index[0, e])
         v = int(edge_index[1, e])
 
-        b  = edge_H[e]    # bond HV
+        b  = edge_H[e]
         hu = node_H[u]
         hv = node_H[v]
 
-        # message from v -> u and u -> v
         msg_u = hv_bind(b, hv)
         msg_v = hv_bind(b, hu)
 
         messages[u] += msg_u
         messages[v] += msg_v
 
-    # update node HVs (like h' = h + m)
     updated = node_H + alpha * messages
-
-    # binarize back to {-1,+1} for stability
-    # updated = torch.sign(updated)
-    # updated[updated == 0] = 1.0
     updated = F.normalize(updated, p=2, dim=1)
 
     return updated
@@ -58,47 +56,48 @@ def _random_projection_matrix(in_dim, out_dim, orthogonal=False, seed=0):
     - orthogonal=False: standard Gaussian / sqrt(in_dim) (JL-style).
     """
     g = torch.Generator().manual_seed(seed)
-    # W = torch.randn(in_dim, out_dim, generator=g)
-    # if orthogonal and out_dim <= in_dim:
-    #     # Orthonormal columns: preserves ||x|| when out_dim >= in_dim; minimizes distortion when out_dim < in_dim
-    #     Q, _ = torch.linalg.qr(W)
-    #     W = Q[:, :out_dim]
-    # else:
-    #     W = W / math.sqrt(in_dim)
 
     if orthogonal:
         if out_dim <= in_dim:
-            # Orthonormal columns: W^T W = I
             Q, _ = torch.linalg.qr(torch.randn(in_dim, out_dim, generator=g))
             W = Q[:, :out_dim]
         else:
-            # Orthonormal rows: W W^T = I
             Q, _ = torch.linalg.qr(torch.randn(out_dim, in_dim, generator=g))
-            W = Q[:, :in_dim].T  # shape (in_dim, out_dim)
+            W = Q[:, :in_dim].T
     else:
         W = torch.randn(in_dim, out_dim, generator=g)
         W = W / math.sqrt(in_dim)
     return W
 
 
-def project_with_vsa(g_list, new_dim, projection_type="orthogonal", seed=0,
-                     feature_mean=None, feature_std=None):
+def _apply_node_bounded_features(X, train_stats):
+    """X [N, 18] float; maps columns to ~[-1,+1] using train_stats from fit."""
+    X = X.clone().float()
+    bc = train_stats["BINARY_COLS"]
+    mm = train_stats["MINMAX_COLS"]
+    X[:, bc] = X[:, bc] * 2.0 - 1.0
+    X[:, mm] = (
+        (X[:, mm] - train_stats["col_min"]) / train_stats["col_range"]
+    ) * 2.0 - 1.0
+    for col, scale in train_stats["TANH_COLS"].items():
+        X[:, col] = torch.tanh(X[:, col] / scale)
+    return X
+
+
+def project_with_vsa(g_list, new_dim, projection_type="orthogonal", seed=0, train_stats=None):
     """
-    Project node features to hypervectors, with optional pre-projection standardization.
+    Map raw node features to ~[-1,+1] per column (train stats for min-max), then random-project.
 
-    If feature_mean and feature_std are None, computes them from the current g_list
-    (training mode). Otherwise applies the provided stats (test mode).
+    train_stats: if None, fit from g_list (training). Else use this dict (test / no leakage).
 
-    Returns: (g_list, feature_mean, feature_std)
-        feature_mean, feature_std: torch.Tensor [F_node] — always returned so callers
-        can pass train stats to test projection.
+    Returns: (g_list, train_stats)
     """
     torch.manual_seed(seed)
     F_node = g_list[0].node_features.shape[1]
-    EXPECTED_NODE_FEAT_DIM = 18  # update if expand_atomic_features in create_graphs.py changes
-    assert F_node == EXPECTED_NODE_FEAT_DIM or feature_mean is not None, (
+    EXPECTED_NODE_FEAT_DIM = 18
+    assert F_node == EXPECTED_NODE_FEAT_DIM or train_stats is not None, (
         f"Node feature dim is {F_node}, expected {EXPECTED_NODE_FEAT_DIM}. "
-        f"Update CONTINUOUS_COLS in project_with_vsa if features were added."
+        f"Update BINARY_COLS / MINMAX_COLS / TANH_COLS if features changed."
     )
     use_orthogonal = projection_type == "orthogonal"
     W_node = _random_projection_matrix(F_node, new_dim, orthogonal=use_orthogonal, seed=seed)
@@ -106,49 +105,40 @@ def project_with_vsa(g_list, new_dim, projection_type="orthogonal", seed=0,
     print("VSA_conversion: node feature dim =", F_node, "new_dim =", new_dim,
           "projection =", projection_type)
 
-    # --- Selective standardization: continuous columns only ---
-    # Binary/one-hot columns already live in {0,1} — standardizing them is unnecessary
-    # and harmful when nearly-constant (std ≈ 0 → clamp explosion).
-    # Layout (18 cols from expand_atomic_features in create_graphs.py):
-    #   0 atomic_number       7 formal_charge       12 num_attached_h
-    #   13 gasteiger  14 crippen_logp  15 tpsa_contrib  17 smallest_ring_size
-    CONTINUOUS_COLS = [0, 1, 2, 7, 12, 13, 14, 15, 17]
-
-    if feature_mean is None:
+    if train_stats is None:
         all_X = torch.cat([g.node_features for g in g_list], dim=0)
-        feature_mean = torch.zeros(F_node, dtype=all_X.dtype)
-        feature_std = torch.ones(F_node, dtype=all_X.dtype)
-        cont = all_X[:, CONTINUOUS_COLS]
-        feature_mean[CONTINUOUS_COLS] = cont.mean(dim=0)
-        feature_std[CONTINUOUS_COLS] = cont.std(dim=0).clamp(min=0.1)
-
-        print("  [Standardization] Selective (continuous cols only).")
-        print(f"    Mean  (cont): {feature_mean[CONTINUOUS_COLS].tolist()}")
-        print(f"    Std   (cont): {feature_std[CONTINUOUS_COLS].tolist()}")
+        col_min = all_X[:, MINMAX_COLS].min(dim=0).values
+        col_range = (all_X[:, MINMAX_COLS].max(dim=0).values - col_min).clamp(min=1e-6)
+        train_stats = {
+            "BINARY_COLS": BINARY_COLS,
+            "MINMAX_COLS": MINMAX_COLS,
+            "TANH_COLS": dict(TANH_COLS),
+            "col_min": col_min,
+            "col_range": col_range,
+        }
+        print("  [Bounded features] Fit min-max on train (cols %s)." % MINMAX_COLS)
+        print(f"    col_min:   {col_min.tolist()}")
+        print(f"    col_range: {col_range.tolist()}")
     else:
-        print("  [Standardization] Applying pre-computed train stats to test data.")
+        print("  [Bounded features] Applying pre-computed train stats (test data).")
 
     for g in g_list:
-        X = (g.node_features - feature_mean) / feature_std
+        X = _apply_node_bounded_features(g.node_features, train_stats)
         g.node_features = torch.matmul(X, W_node)
 
     print("g list item shape after VSA:", g_list[0].node_features.shape)
-    return g_list, feature_mean, feature_std
+    return g_list, train_stats
 
 
-def VSA_conversion(g_list, new_dim=None, projection_type="orthogonal", seed=0,
-                   feature_mean=None, feature_std=None):
+def VSA_conversion(g_list, new_dim=None, projection_type="orthogonal", seed=0, train_stats=None):
     """
-    Build neighbors & edge_mat for GraphCNN. If new_dim is set, project node
-    features to HVs with optional pre-projection standardization.
+    Build neighbors & edge_mat for GraphCNN. If new_dim is set, project node features to HVs.
 
-    feature_mean, feature_std: if None, computed from g_list (training).
-        Pass training stats here for test data to avoid data leakage.
+    train_stats: if None on first call, fit bounded transforms from g_list; pass the returned
+        dict into the test call so test uses training min-max (no leakage).
 
-    Returns: (g_list, feature_mean, feature_std)
-        feature_mean/std are None if new_dim is None (no projection done).
+    Returns: (g_list, train_stats) — train_stats is None when new_dim is None.
     """
-    # Build neighbors and edge_mat; use edge_index when available (aligns with edge_attr)
     for g in g_list:
         g.neighbors = [[] for _ in range(len(g.g))]
         for i, j in g.g.edges():
@@ -168,10 +158,9 @@ def VSA_conversion(g_list, new_dim=None, projection_type="orthogonal", seed=0,
                 g.edge_mat = torch.zeros((2, 0), dtype=torch.long)
 
     if not new_dim:
-        return g_list, None, None
+        return g_list, None
 
-    g_list, feature_mean, feature_std = project_with_vsa(
-        g_list, new_dim, projection_type=projection_type, seed=seed,
-        feature_mean=feature_mean, feature_std=feature_std,
+    g_list, train_stats = project_with_vsa(
+        g_list, new_dim, projection_type=projection_type, seed=seed, train_stats=train_stats,
     )
-    return g_list, feature_mean, feature_std
+    return g_list, train_stats

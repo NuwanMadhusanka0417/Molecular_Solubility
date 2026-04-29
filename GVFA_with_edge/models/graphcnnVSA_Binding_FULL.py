@@ -7,6 +7,10 @@ import sys
 sys.path.append("models/")
 from models.mlp import MLP
 
+# Edge attr [E, 5]: bond_type, conjugated, in_ring, bond_length, stereo — map to ~[-1,+1] before projection
+EDGE_BINARY_COLS = [1, 2]
+EDGE_MINMAX_COLS = [0, 3, 4]
+
 class GraphCNN(nn.Module):
     def __init__(self, input_dim, num_layers, delta, graph_pooling_type, neighbor_pooling_type, device, equation, edge_feat_dim=5, edge_projection_type="orthogonal", use_reservoir=False, reservoir_iters=7, reservoir_alpha=0.8, reservoir_polynomial_order=2, reservoir_history_weight=0.75, use_resonator=False, resonator_iters=7, resonator_beta=0.75, hop_decay=0.85, sigma_pi_orders=None, rng_seed=0):
         '''
@@ -50,23 +54,22 @@ class GraphCNN(nn.Module):
             else:
                 W_edge = W_edge / math.sqrt(self.edge_feat_dim)
             self.register_buffer("W_edge", W_edge)
-        # Edge stats: do not pre-assign edge_feat_mean/std — plain attributes block register_buffer in set_edge_stats.
 
-    def set_edge_stats(self, edge_mean: torch.Tensor, edge_std: torch.Tensor):
+    def set_edge_stats(self, edge_col_min: torch.Tensor, edge_col_range: torch.Tensor):
         """
-        Store training-set edge feature statistics for standardization in forward().
+        Store training-set min/range for EDGE_MINMAX_COLS only; binary cols remapped in forward.
 
-        edge_mean: [F_edge] — mean of each edge feature over all training edges.
-        edge_std:  [F_edge] — std of each edge feature (caller should clamp, e.g. min 0.01).
+        edge_col_min:   [3] — min of (bond_type, bond_length, stereo) over train edges
+        edge_col_range: [3] — max-min, clamped ≥ 1e-6
         """
-        em = edge_mean.to(self.device).clone()
-        es = edge_std.to(self.device).clone()
-        if "edge_feat_mean" in self._buffers:
-            self.edge_feat_mean = em
-            self.edge_feat_std = es
+        cmin = edge_col_min.to(self.device).clone()
+        crng = edge_col_range.to(self.device).clone()
+        if "edge_col_min" in self._buffers:
+            self.edge_col_min = cmin
+            self.edge_col_range = crng
         else:
-            self.register_buffer("edge_feat_mean", em)
-            self.register_buffer("edge_feat_std", es)
+            self.register_buffer("edge_col_min", cmin)
+            self.register_buffer("edge_col_range", crng)
 
     def __preprocess_neighbors_sumavepool(self, batch_graph):
         ###create block diagonal sparse matrix
@@ -362,7 +365,7 @@ class GraphCNN(nn.Module):
         return pooled
 
     def next_layer_eps(self, h, layer, padded_neighbor_list=None, Adj_block=None, delta=1, equation=10,
-                       edge_index=None, edge_H=None, num_nodes=None, return_pre_sign=False):
+                       edge_index=None, edge_H=None, num_nodes=None, return_pre_norm=False):
         shift = 1
 
         if equation == 10:
@@ -406,11 +409,10 @@ class GraphCNN(nn.Module):
             pooled = torch.roll(pooled, shifts=shift, dims=1)
             
 
-        pre_bin = pooled
-        # print(pooled)
-        pooled = torch.sign(pooled)
-        if return_pre_sign:
-            return pooled, pre_bin
+        pre_norm = pooled
+        pooled = F.normalize(pooled, p=2, dim=1, eps=1e-8)
+        if return_pre_norm:
+            return pooled, pre_norm
         return pooled
 
 
@@ -420,7 +422,7 @@ class GraphCNN(nn.Module):
         """
         return_node_rep: if True, return (H, batch) with H [N, D] node hypervectors and batch [N]
                          for use with attention readout. Only one of graph-level or node-level is returned.
-        capture_aux: if True, fill self._aux with layer pre/post binarization HV and sigma-pi tensors
+        capture_aux: if True, fill self._aux with layer pre/post L2-normalization HV and sigma-pi tensors
                      (same forward math as capture_aux=False).
         """
         self._aux = None
@@ -440,9 +442,13 @@ class GraphCNN(nn.Module):
         edge_H = None
         if batched_ei is not None and batched_ea is not None and self.edge_feat_dim > 0 and hasattr(self, "W_edge"):
             edge_index = batched_ei
-            ea = batched_ea.to(X_concat.dtype)
-            if "edge_feat_mean" in self._buffers and "edge_feat_std" in self._buffers:
-                ea = (ea - self.edge_feat_mean) / self.edge_feat_std
+            ea = batched_ea.to(X_concat.dtype).float()
+            if "edge_col_min" in self._buffers and "edge_col_range" in self._buffers:
+                ea = ea.clone()
+                ea[:, EDGE_BINARY_COLS] = ea[:, EDGE_BINARY_COLS] * 2.0 - 1.0
+                cmin = self.edge_col_min
+                crng = self.edge_col_range
+                ea[:, EDGE_MINMAX_COLS] = ((ea[:, EDGE_MINMAX_COLS] - cmin) / crng) * 2.0 - 1.0
             edge_H = torch.mm(ea, self.W_edge)
 
         hidden_rep = [X_concat]
@@ -458,7 +464,7 @@ class GraphCNN(nn.Module):
                     edge_index=edge_index,
                     edge_H=edge_H,
                     num_nodes=num_nodes,
-                    return_pre_sign=True,
+                    return_pre_norm=True,
                 )
                 layer_pre_bin.append(pre.detach())
                 layer_post_bin.append(h.detach())

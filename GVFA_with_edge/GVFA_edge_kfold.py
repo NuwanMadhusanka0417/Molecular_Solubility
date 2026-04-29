@@ -25,7 +25,7 @@ from src.create_graphs import create_graph_list
 from src.load_data import ZINCLikeCSV
 from src.VSA_conversion import VSA_conversion
 from src.embeddings import getEmbedding
-from models.graphcnnVSA_Binding_FULL import GraphCNN
+from models.graphcnnVSA_Binding_FULL import GraphCNN, EDGE_MINMAX_COLS
 
 
 def compute_metrics(y_true, y_pred):
@@ -110,12 +110,12 @@ def run_gvfa_ridge_train_test(args, train_data, test_data, device):
 
         train_graphs = create_graph_list(train_data)
         test_graphs = create_graph_list(test_data)
-        train_HVs, node_feat_mean, node_feat_std = VSA_conversion(
+        train_HVs, node_train_stats = VSA_conversion(
             train_graphs.copy(), dim, projection_type="orthogonal", seed=seed,
         )
-        test_HVs, _, _ = VSA_conversion(
+        test_HVs, _ = VSA_conversion(
             test_graphs.copy(), dim, projection_type="orthogonal", seed=seed,
-            feature_mean=node_feat_mean, feature_std=node_feat_std,
+            train_stats=node_train_stats,
         )
 
         for sigma_pi_orders, sigma_tag in sigma_configs:
@@ -141,14 +141,16 @@ def run_gvfa_ridge_train_test(args, train_data, test_data, device):
                     _edge_attrs.append(g.edge_attr.to(torch.float32))
             if _edge_attrs:
                 all_edge_feats = torch.cat(_edge_attrs, dim=0)
-                edge_mean = all_edge_feats.mean(dim=0)
-                edge_std = all_edge_feats.std(dim=0).clamp(min=0.01)
-                model_eq1.set_edge_stats(edge_mean, edge_std)
-                print(f"  [Edge Standardization] Fitted on {all_edge_feats.shape[0]} "
-                      f"training edges. Bond-length mean: {edge_mean[3]:.4f} Å, "
-                      f"std: {edge_std[3]:.4f}")
+                edge_col_min = all_edge_feats[:, EDGE_MINMAX_COLS].min(dim=0).values
+                edge_col_range = (
+                    all_edge_feats[:, EDGE_MINMAX_COLS].max(dim=0).values - edge_col_min
+                ).clamp(min=1e-6)
+                model_eq1.set_edge_stats(edge_col_min, edge_col_range)
+                print(f"  [Edge features] Bounded [-1,1] fit on {all_edge_feats.shape[0]} "
+                      f"training edges. bond_length min/range: "
+                      f"{edge_col_min[1]:.4f} / {edge_col_range[1]:.4f}")
             else:
-                print("  [Edge Standardization] No edge attrs found; skipping.")
+                print("  [Edge features] No edge attrs found; skipping.")
             train_emb, train_labels = getEmbedding(
                 model_eq1, device, train_HVs, use_size_aware=True, hop_alpha=1.0,
             )
@@ -248,12 +250,12 @@ def run_gvfa_ridge_one_split(args, train_data, eval_data, device, fold_label="")
 
         train_graphs = create_graph_list(train_data)
         eval_graphs = create_graph_list(eval_data)
-        train_HVs, node_feat_mean, node_feat_std = VSA_conversion(
+        train_HVs, node_train_stats = VSA_conversion(
             train_graphs.copy(), dim, projection_type="orthogonal", seed=seed,
         )
-        eval_HVs, _, _ = VSA_conversion(
+        eval_HVs, _ = VSA_conversion(
             eval_graphs.copy(), dim, projection_type="orthogonal", seed=seed,
-            feature_mean=node_feat_mean, feature_std=node_feat_std,
+            train_stats=node_train_stats,
         )
 
         for sigma_pi_orders, sigma_tag in sigma_configs:
@@ -279,14 +281,16 @@ def run_gvfa_ridge_one_split(args, train_data, eval_data, device, fold_label="")
                     _edge_attrs.append(g.edge_attr.to(torch.float32))
             if _edge_attrs:
                 all_edge_feats = torch.cat(_edge_attrs, dim=0)
-                edge_mean = all_edge_feats.mean(dim=0)
-                edge_std = all_edge_feats.std(dim=0).clamp(min=0.01)
-                model_eq1.set_edge_stats(edge_mean, edge_std)
-                print(f"  [Edge Standardization] Fitted on {all_edge_feats.shape[0]} "
-                      f"training edges. Bond-length mean: {edge_mean[3]:.4f} Å, "
-                      f"std: {edge_std[3]:.4f}")
+                edge_col_min = all_edge_feats[:, EDGE_MINMAX_COLS].min(dim=0).values
+                edge_col_range = (
+                    all_edge_feats[:, EDGE_MINMAX_COLS].max(dim=0).values - edge_col_min
+                ).clamp(min=1e-6)
+                model_eq1.set_edge_stats(edge_col_min, edge_col_range)
+                print(f"  [Edge features] Bounded [-1,1] fit on {all_edge_feats.shape[0]} "
+                      f"training edges. bond_length min/range: "
+                      f"{edge_col_min[1]:.4f} / {edge_col_range[1]:.4f}")
             else:
-                print("  [Edge Standardization] No edge attrs found; skipping.")
+                print("  [Edge features] No edge attrs found; skipping.")
             train_emb, train_labels = getEmbedding(
                 model_eq1, device, train_HVs, use_size_aware=True, hop_alpha=1.0,
             )
