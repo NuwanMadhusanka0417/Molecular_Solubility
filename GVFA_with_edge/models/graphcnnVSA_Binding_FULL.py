@@ -147,15 +147,13 @@ class GraphCNN(nn.Module):
 
     def _edge_message_pool(self, h_to_pool, edge_index, edge_H, num_nodes):
         """
-        Edge-conditioned message passing: for each edge (src, dst), message = bind(h_to_pool[src], edge_H[e]),
-        then aggregate at dst. Caller passes rotated or plain h as h_to_pool. Physically: combine
-        neighbour atom with the bond along that edge, send message along that bond.
-        L2-normalizes after sum so magnitude is degree-invariant (VSA norm control).
+        Edge messages: bind(neighbor_h, edge_H), sum at dst, then L2-normalize per node.
+        Normalizing after aggregation prevents degree-dependent norm blow-up.
         """
-        D = h_to_pool.shape[1]
         src, dst = edge_index[0], edge_index[1]
         neighbor_h = h_to_pool[src]
         messages = self.bind(neighbor_h, edge_H)
+        D = h_to_pool.shape[1]
         pooled = torch.zeros(num_nodes, D, device=h_to_pool.device, dtype=h_to_pool.dtype)
         pooled.index_add_(0, dst, messages)
         pooled = F.normalize(pooled, p=2, dim=1, eps=1e-8)
@@ -358,7 +356,8 @@ class GraphCNN(nn.Module):
         if avg:
             degree = torch.spmm(Adj_block, torch.ones((Adj_block.shape[0], 1)).to(self.device))
             pooled = pooled / degree
-        return pooled
+        # Degree-invariant unit norm (same idea as _edge_message_pool after sum/average)
+        return F.normalize(pooled, p=2, dim=1, eps=1e-8)
 
     def next_layer_eps(self, h, layer, padded_neighbor_list=None, Adj_block=None, delta=1, equation=10,
                        edge_index=None, edge_H=None, num_nodes=None, return_pre_norm=False):
@@ -389,18 +388,18 @@ class GraphCNN(nn.Module):
             if delta == 1:
                 bound = self.bind(h, pooled_nb)
                 bundled = bound + h
-                pre_norm = torch.roll(bundled, shifts=shift, dims=1)
+                pre_norm = bundled
                 pooled = F.normalize(bundled, p=2, dim=1, eps=eps_n)
                 pooled = torch.roll(pooled, shifts=shift, dims=1)
             elif delta == 2:
                 bound = self.bind(h, pooled_nb)
                 bundled = bound + h + pooled_nb
-                pre_norm = torch.roll(bundled, shifts=shift, dims=1)
+                pre_norm = bundled
                 pooled = F.normalize(bundled, p=2, dim=1, eps=eps_n)
                 pooled = torch.roll(pooled, shifts=shift, dims=1)
             else:
                 bundled = pooled_nb + h
-                pre_norm = torch.roll(bundled, shifts=shift, dims=1)
+                pre_norm = bundled
                 pooled = F.normalize(bundled, p=2, dim=1, eps=eps_n)
                 pooled = torch.roll(pooled, shifts=shift, dims=1)
 
@@ -410,18 +409,18 @@ class GraphCNN(nn.Module):
             if delta == 1:
                 bound = self.bind(h, pooled_nb)
                 bundled = bound + h
-                pre_norm = torch.roll(bundled, shifts=shift, dims=1)
+                pre_norm = bundled
                 pooled = F.normalize(bundled, p=2, dim=1, eps=eps_n)
                 pooled = torch.roll(pooled, shifts=shift, dims=1)
             elif delta == 2:
                 bound = self.bind(h, pooled_nb)
                 bundled = bound + h + pooled_nb
-                pre_norm = torch.roll(bundled, shifts=shift, dims=1)
+                pre_norm = bundled
                 pooled = F.normalize(bundled, p=2, dim=1, eps=eps_n)
                 pooled = torch.roll(pooled, shifts=shift, dims=1)
             else:
                 bundled = pooled_nb + h
-                pre_norm = torch.roll(bundled, shifts=shift, dims=1)
+                pre_norm = bundled
                 pooled = F.normalize(bundled, p=2, dim=1, eps=eps_n)
                 pooled = torch.roll(pooled, shifts=shift, dims=1)
 

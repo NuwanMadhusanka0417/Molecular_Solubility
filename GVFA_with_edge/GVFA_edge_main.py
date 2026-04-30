@@ -6,6 +6,7 @@ GVFA encoder -> embeddings -> Ridge/XGBoost (no training).
 Train: solubility_1.csv.  Test: testset_novel.csv.
 """
 import argparse
+import copy
 import csv
 import os
 import random
@@ -154,7 +155,8 @@ def _parse_sigma_pi_arg(s: str):
     return [(orders, tag)]
 
 
-def run_gvfa_ridge(args, train_data, test_data, device):
+def run_gvfa_ridge(args, train_data, test_data, device,
+                   train_graphs_base=None, test_graphs_base=None):
     seed = args.seed
     dims = [int(x) for x in args.dims.split(',')]
     sigma_configs = _parse_sigma_pi_arg(args.sigma_pi)
@@ -177,15 +179,31 @@ def run_gvfa_ridge(args, train_data, test_data, device):
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(seed)
 
-        train_graphs = create_graph_list(train_data)
-        test_graphs = create_graph_list(test_data)
+        if train_graphs_base is not None and test_graphs_base is not None:
+            train_graphs = copy.deepcopy(train_graphs_base)
+            test_graphs = copy.deepcopy(test_graphs_base)
+        else:
+            train_graphs = create_graph_list(train_data)
+            test_graphs = create_graph_list(test_data)
+
         train_HVs, node_train_stats = VSA_conversion(
-            train_graphs.copy(), dim, projection_type="orthogonal", seed=seed,
+            train_graphs, dim, projection_type="orthogonal", seed=seed,
         )
         test_HVs, _ = VSA_conversion(
-            test_graphs.copy(), dim, projection_type="orthogonal", seed=seed,
+            test_graphs, dim, projection_type="orthogonal", seed=seed,
             train_stats=node_train_stats,
         )
+        if node_train_stats is not None:
+            print(f"  [Seed {seed}] node train_stats col_min: "
+                  f"{node_train_stats['col_min'].tolist()}")
+            if len(train_HVs) > 0:
+                norm_means = [
+                    g.node_features.norm(dim=1).mean()
+                    for g in train_HVs[:5]
+                ]
+                nk = len(norm_means)
+                print(f"  [Seed {seed}] train HV norm mean (first {nk} graphs): "
+                      f"{torch.stack(norm_means).mean():.4f}")
 
         for sigma_pi_orders, sigma_tag in sigma_configs:
             torch.manual_seed(seed)
@@ -308,6 +326,17 @@ def main():
 
     train_data, test_data = load_data(dataset=args.dataset, seed=seeds[0])
 
+    print("Building graph objects (ETKDGv3 conformers)...")
+    train_graphs_base = create_graph_list(train_data)
+    test_graphs_base = create_graph_list(test_data)
+    print(f"  Train graphs: {len(train_graphs_base)}, Test graphs: {len(test_graphs_base)}")
+    sample_ea = train_graphs_base[0].edge_attr
+    if sample_ea is not None and sample_ea.numel() > 0:
+        print(
+            "  Sample edge_attr[0] (bond_type, conj, in_ring, length, stereo): "
+            f"{sample_ea[0].tolist()}"
+        )
+
     for seed in seeds:
         print("\n" + "=" * 80)
         print(f"SEED = {seed}")
@@ -319,7 +348,10 @@ def main():
             original_save = args.save_results
             args.save_results = os.path.join(original_save, f"seed_{seed}")
 
-        run_gvfa_ridge(args, train_data, test_data, device)
+        run_gvfa_ridge(
+            args, train_data, test_data, device,
+            train_graphs_base, test_graphs_base,
+        )
 
         if args.save_results:
             args.save_results = original_save
