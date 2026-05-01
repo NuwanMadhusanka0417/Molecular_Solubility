@@ -1,7 +1,7 @@
 """
 GVFA for molecular solubility prediction.
 
-GVFA encoder -> embeddings -> Ridge/XGBoost (no training).
+GVFA encoder -> embeddings -> RidgeCV, RBF Kernel Ridge, or XGBoost (no encoder training).
 
 Train: solubility_1.csv.  Test: testset_novel.csv.
 """
@@ -21,6 +21,8 @@ import torch
 import numpy as np
 from scipy.stats import pearsonr
 from sklearn.linear_model import RidgeCV
+from sklearn.kernel_ridge import KernelRidge
+from sklearn.model_selection import GridSearchCV
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
 
@@ -100,6 +102,13 @@ def parse_args():
     p.add_argument('--batch_size', type=int, default=64)
     p.add_argument('--use_ridge', action='store_true', default=True)
     p.add_argument('--no_ridge', action='store_false', dest='use_ridge')
+    p.add_argument(
+        '--ridge_type',
+        type=str,
+        default='ridgecv',
+        choices=['ridgecv', 'rbf_ridge'],
+        help='When --use_ridge: linear RidgeCV (alphas via CV) or RBF KernelRidge (alpha+gamma via GridSearchCV).',
+    )
     p.add_argument('--seed', type=int, default=42, help='Single RNG seed (use --seeds for multiple)')
     p.add_argument('--seeds', type=str, default=None,
                    help='Multiple seeds: range "0-49" or comma-separated "0,1,42,123". Overrides --seed.')
@@ -166,7 +175,7 @@ def run_gvfa_ridge(args, train_data, test_data, device,
         os.makedirs(args.save_results, exist_ok=True)
         summary_path = os.path.join(args.save_results, 'results_summary.csv')
         summary_fields = [
-            'dim', 'sigma_pi', 'sigma_tag', 'seed',
+            'dim', 'sigma_pi', 'sigma_tag', 'seed', 'regressor',
             'RMSE', 'STD_err', 'MAE', 'R2_COD', 'Pearson_R2', 'Pearson_R',
         ]
         with open(summary_path, 'w', newline='') as f:
@@ -250,9 +259,30 @@ def run_gvfa_ridge(args, train_data, test_data, device,
             test_emb = test_emb.squeeze(0)
 
             if args.use_ridge:
-                reg = RidgeCV(alphas=np.logspace(-2, 4, 100), cv=5, scoring='neg_mean_squared_error')
-                reg.fit(train_emb, train_labels)
-                pred = reg.predict(test_emb)
+                if args.ridge_type == 'ridgecv':
+                    reg = RidgeCV(
+                        alphas=np.logspace(-2, 4, 100),
+                        cv=5,
+                        scoring='neg_mean_squared_error',
+                    )
+                    reg.fit(train_emb, train_labels)
+                    pred = reg.predict(test_emb)
+                else:
+                    kr = KernelRidge(kernel='rbf')
+                    param_grid = {
+                        'alpha': np.logspace(-4, 4, 40),
+                        'gamma': np.logspace(-6, 2, 25),
+                    }
+                    reg = GridSearchCV(
+                        kr,
+                        param_grid,
+                        cv=5,
+                        scoring='neg_mean_squared_error',
+                        n_jobs=-1,
+                        refit=True,
+                    )
+                    reg.fit(train_emb, train_labels)
+                    pred = reg.predict(test_emb)
             else:
                 from xgboost import XGBRegressor
                 reg = XGBRegressor(
@@ -265,8 +295,9 @@ def run_gvfa_ridge(args, train_data, test_data, device,
 
             m = compute_metrics(test_labels, pred)
             orders_str = ','.join(str(x) for x in sigma_pi_orders)
+            reg_tag = args.ridge_type if args.use_ridge else 'xgboost'
             print(
-                f"Dim={dim}  sigma_pi=[{orders_str}]  ({sigma_tag})  "
+                f"Dim={dim}  sigma_pi=[{orders_str}]  ({sigma_tag})  head={reg_tag}  "
                 f"RMSE={m['rmse']:.4f}  STD_err={m['std_err']:.4f}  MAE={m['mae']:.4f}  "
                 f"R2_COD={m['r2_cod']:.4f}  Pearson_R2={m['pearson_r2']:.4f}",
             )
@@ -275,7 +306,7 @@ def run_gvfa_ridge(args, train_data, test_data, device,
                 y_true = np.asarray(test_labels).ravel()
                 y_pred = np.asarray(pred).ravel()
                 pred_path = os.path.join(
-                    args.save_results, f'predictions_dim{dim}_{sigma_tag}.csv',
+                    args.save_results, f'predictions_dim{dim}_{sigma_tag}_{reg_tag}.csv',
                 )
                 with open(pred_path, 'w', newline='') as f:
                     w = csv.writer(f)
@@ -289,6 +320,7 @@ def run_gvfa_ridge(args, train_data, test_data, device,
                         'sigma_pi': f'[{orders_str}]',
                         'sigma_tag': sigma_tag,
                         'seed': seed,
+                        'regressor': reg_tag,
                         'RMSE': f'{m["rmse"]:.6f}',
                         'STD_err': f'{m["std_err"]:.6f}',
                         'MAE': f'{m["mae"]:.6f}',
@@ -300,7 +332,8 @@ def run_gvfa_ridge(args, train_data, test_data, device,
 
             if args.export_analysis_dir:
                 sub = os.path.join(
-                    args.export_analysis_dir, f"ridge_dim_{dim}_sigma_{sigma_tag}",
+                    args.export_analysis_dir,
+                    f"ridge_dim_{dim}_sigma_{sigma_tag}_{reg_tag}",
                 )
                 export_hypervector_analysis(
                     model_eq1, train_graphs, device, sub, "train", args.batch_size,

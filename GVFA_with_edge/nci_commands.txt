@@ -26,3 +26,12 @@ python GVFA_edge_kfold.py --k 5 --dims 2000 --sigma_pi legacy --seed 42
 
 # 10-fold, multiple seeds
 python GVFA_edge_kfold.py --k 10 --dims 1000,2000 --sigma_pi legacy --seeds 0,1,42
+
+# Linear RidgeCV (default)
+python GVFA_edge_main.py
+
+# RBF kernel ridge
+python GVFA_edge_main.py --ridge_type rbf_ridge
+
+# XGBoost head (unchanged; --ridge_type ignored)
+python GVFA_edge_main.py --no_ridge
