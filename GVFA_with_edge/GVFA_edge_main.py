@@ -250,7 +250,7 @@ def run_gvfa_ridge(args, train_data, test_data, device,
             test_emb = test_emb.squeeze(0)
 
             if args.use_ridge:
-                reg = RidgeCV(alphas=np.logspace(-4, 2, 50), cv=5, scoring='neg_mean_squared_error')
+                reg = RidgeCV(alphas=np.logspace(-2, 4, 100), cv=5, scoring='neg_mean_squared_error')
                 reg.fit(train_emb, train_labels)
                 pred = reg.predict(test_emb)
             else:
