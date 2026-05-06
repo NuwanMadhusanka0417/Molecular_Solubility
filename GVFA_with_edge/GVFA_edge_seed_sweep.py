@@ -129,13 +129,14 @@ def precompute_graphs(data, cache_path=None):
 
 
 def build_embeddings_fast(graphs, original_features, dim, seed,
-                          sigma_pi_orders, device):
+                          sigma_pi_orders, device, binding_type="circular"):
     """
     Project cached graphs and extract embeddings.  Skips create_graph_list
     and neighbor-building entirely — only does the cheap projection + encoder.
 
     graphs:            pre-computed graph list (from precompute_graphs)
     original_features: list of [N_i, F_node] tensors (saved once before loop)
+    binding_type:      'circular' (FFT) or 'hadamard' (elementwise)
     """
     set_all_seeds(seed)
 
@@ -153,7 +154,7 @@ def build_embeddings_fast(graphs, original_features, dim, seed,
         dim, 5, 1, 'sum', 'sum', device, 10,
         edge_feat_dim=5, edge_projection_type="orthogonal",
         use_reservoir=True, hop_decay=0.85, sigma_pi_orders=sigma_pi_orders,
-        rng_seed=seed,
+        rng_seed=seed, binding_type=binding_type,
     )
     emb, labels = getEmbedding(
         encoder, device, graphs, use_size_aware=True, hop_alpha=1.0,
@@ -184,6 +185,16 @@ def parse_args():
                    help='Directory for output CSVs')
     p.add_argument('--top_k', type=int, default=5,
                    help='Show top-K configs at the end')
+    p.add_argument(
+        '--binding',
+        type=str,
+        default='circular',
+        choices=['circular', 'hadamard'],
+        help=(
+            'VSA binding operator. "circular" = FFT circular convolution (default). '
+            '"hadamard" = elementwise multiplication (preserves geometry better).'
+        ),
+    )
     return p.parse_args()
 
 
@@ -302,11 +313,11 @@ def main():
 
                 tr_emb, tr_labels = build_embeddings_fast(
                     train_graphs, train_orig_feats, dim, seed,
-                    sigma_pi_orders, device,
+                    sigma_pi_orders, device, binding_type=args.binding,
                 )
                 va_emb, va_labels = build_embeddings_fast(
                     val_graphs, val_orig_feats, dim, seed,
-                    sigma_pi_orders, device,
+                    sigma_pi_orders, device, binding_type=args.binding,
                 )
 
                 reg = RidgeCV(
@@ -382,11 +393,11 @@ def main():
 
     full_emb, full_labels = build_embeddings_fast(
         full_train_graphs, full_train_orig_feats, best_dim, best_seed,
-        best_sigma_orders, device,
+        best_sigma_orders, device, binding_type=args.binding,
     )
     test_emb, test_labels = build_embeddings_fast(
         test_graphs, test_orig_feats, best_dim, best_seed,
-        best_sigma_orders, device,
+        best_sigma_orders, device, binding_type=args.binding,
     )
 
     reg_final = RidgeCV(
@@ -459,11 +470,11 @@ def main():
 
         fe, fl = build_embeddings_fast(
             full_train_graphs, full_train_orig_feats, r_dim, r_seed,
-            r_sigma_orders, device,
+            r_sigma_orders, device, binding_type=args.binding,
         )
         te, tl = build_embeddings_fast(
             test_graphs, test_orig_feats, r_dim, r_seed,
-            r_sigma_orders, device,
+            r_sigma_orders, device, binding_type=args.binding,
         )
         reg_k = RidgeCV(
             alphas=np.logspace(-4, 2, 50), cv=5,

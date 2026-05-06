@@ -15,6 +15,7 @@ from src.create_graphs import create_graph_list
 from src.load_data import load_data
 from src.VSA_conversion import VSA_conversion
 from src.embeddings import getEmbedding
+from src.tsne_viz import draw_tsne_pipeline
 from models.graphcnnVSA_Binding_FULL import GraphCNN, EDGE_MINMAX_COLS
 
 import torch
@@ -96,9 +97,10 @@ def parse_args():
     p.add_argument('--dataset', type=str, default='solubility_novel',
                    choices=['old', 'solubility_novel', 'new'],
                    help='solubility_novel: train solubility_1.csv, test testset_novel.csv')
-    p.add_argument('--dim', type=int, default=1000, help='VSA dimension')
-    p.add_argument('--dims', type=str, default='1000, 2000, 5000, 10000',
-                   help='Comma-separated dims for gvfa_ridge loop')
+    p.add_argument('--dim', type=int, default=1000, help='VSA dimension (used when --dims is omitted)')
+    p.add_argument('--dims', type=str, default=None,
+                   help='Comma-separated dims for gvfa_ridge loop (overrides --dim). '
+                        'Example: "1000,2000,5000". Default: use --dim only.')
     p.add_argument('--batch_size', type=int, default=64)
     p.add_argument('--use_ridge', action='store_true', default=True)
     p.add_argument('--no_ridge', action='store_false', dest='use_ridge')
@@ -127,6 +129,49 @@ def parse_args():
         '--export_analysis_dir', type=str, default=None,
         help='If set, save per-batch .npz files: GVFA layer pre/post L2-normalization HV, '
              'sigma-pi per order + combined, F1 tap buffer, y (logS), and node graph ids.',
+    )
+    p.add_argument(
+        '--tsne',
+        action='store_true',
+        default=False,
+        help='If set, draw t-SNE plots of HV representations at each pipeline stage '
+             'after the model is built. Plots are saved to --tsne_out_dir.',
+    )
+    p.add_argument(
+        '--tsne_split',
+        type=str,
+        default='test',
+        choices=['train', 'test', 'both'],
+        help='Which split to visualise with t-SNE (default: test).',
+    )
+    p.add_argument(
+        '--tsne_max_mols',
+        type=int,
+        default=500,
+        help='Max molecules to use for t-SNE. 0 = all (slow). Default: 500.',
+    )
+    p.add_argument(
+        '--tsne_out_dir',
+        type=str,
+        default='tsne_plots',
+        help='Directory to save t-SNE PNG files (default: tsne_plots).',
+    )
+    p.add_argument(
+        '--tsne_perplexity',
+        type=int,
+        default=30,
+        help='t-SNE perplexity (default: 30).',
+    )
+    p.add_argument(
+        '--binding',
+        type=str,
+        default='circular',
+        choices=['circular', 'hadamard'],
+        help=(
+            'VSA binding operator used in all bind() calls. '
+            '"circular" = FFT circular convolution (default, HRR-style). '
+            '"hadamard" = elementwise multiplication (MAP-style, preserves geometry better).'
+        ),
     )
     return p.parse_args()
 
@@ -167,7 +212,10 @@ def _parse_sigma_pi_arg(s: str):
 def run_gvfa_ridge(args, train_data, test_data, device,
                    train_graphs_base=None, test_graphs_base=None):
     seed = args.seed
-    dims = [int(x) for x in args.dims.split(',')]
+    if args.dims is not None:
+        dims = [int(x.strip()) for x in args.dims.split(',') if x.strip()]
+    else:
+        dims = [args.dim]
     sigma_configs = _parse_sigma_pi_arg(args.sigma_pi)
 
     save = args.save_results is not None
@@ -220,10 +268,10 @@ def run_gvfa_ridge(args, train_data, test_data, device,
                 torch.cuda.manual_seed_all(seed)
 
             model_eq1 = GraphCNN(
-                test_HVs[0].node_features.shape[1], 5, 1, 'sum', 'sum', device, 10,
+                test_HVs[0].node_features.shape[1], 5, 0, 'sum', 'sum', device, 11,
                 edge_feat_dim=5, edge_projection_type="orthogonal",
                 use_reservoir=True, hop_decay=0.85, sigma_pi_orders=sigma_pi_orders,
-                rng_seed=seed,
+                rng_seed=seed, binding_type=args.binding,
             )
             # edge_attr stays raw [E, 5]; VSA_conversion only overwrites node_features.
             _eref = next((g.edge_attr for g in train_HVs if g.edge_attr is not None and g.edge_attr.numel() > 0), None)
@@ -249,6 +297,23 @@ def run_gvfa_ridge(args, train_data, test_data, device,
                       f"{edge_col_min[1]:.4f} / {edge_col_range[1]:.4f}")
             else:
                 print("  [Edge features] No edge attrs found; skipping.")
+            if args.tsne:
+                tsne_out = args.tsne_out_dir
+                if args.save_results:
+                    tsne_out = os.path.join(args.save_results, 'tsne')
+                draw_tsne_pipeline(
+                    model=model_eq1,
+                    train_HVs=train_HVs,
+                    test_HVs=test_HVs,
+                    device=device,
+                    split=args.tsne_split,
+                    max_mols=args.tsne_max_mols,
+                    out_dir=tsne_out,
+                    tsne_perplexity=args.tsne_perplexity,
+                    seed=seed,
+                    dim=dim,
+                    sigma_tag=sigma_tag,
+                )
             train_emb, train_labels = getEmbedding(
                 model_eq1, device, train_HVs, use_size_aware=True, hop_alpha=1.0,
             )
@@ -358,7 +423,7 @@ def main():
     print(f"Seeds: {seeds}")
 
     train_data, test_data = load_data(dataset=args.dataset, seed=seeds[0])
-
+    train_data, test_data = train_data[200:400], test_data
     print("Building graph objects (ETKDGv3 conformers)...")
     train_graphs_base = create_graph_list(train_data)
     test_graphs_base = create_graph_list(test_data)

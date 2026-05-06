@@ -12,7 +12,7 @@ EDGE_BINARY_COLS = [1, 2]
 EDGE_MINMAX_COLS = [0, 3, 4]
 
 class GraphCNN(nn.Module):
-    def __init__(self, input_dim, num_layers, delta, graph_pooling_type, neighbor_pooling_type, device, equation, edge_feat_dim=5, edge_projection_type="orthogonal", use_reservoir=False, reservoir_iters=7, reservoir_alpha=0.8, reservoir_polynomial_order=2, reservoir_history_weight=0.75, use_resonator=False, resonator_iters=7, resonator_beta=0.75, hop_decay=0.85, sigma_pi_orders=None, rng_seed=0):
+    def __init__(self, input_dim, num_layers, delta, graph_pooling_type, neighbor_pooling_type, device, equation, edge_feat_dim=5, edge_projection_type="orthogonal", use_reservoir=False, reservoir_iters=7, reservoir_alpha=0.8, reservoir_polynomial_order=2, reservoir_history_weight=0.75, use_resonator=False, resonator_iters=7, resonator_beta=0.75, hop_decay=0.25, sigma_pi_orders=None, rng_seed=0, binding_type="circular"):
         '''
             use_reservoir: VSA-RC (VSA Reservoir Computing): tap buffer + Sigma-Pi polynomial expansion
             reservoir_iters, reservoir_alpha, reservoir_history_weight: unused (kept for compat)
@@ -20,6 +20,8 @@ class GraphCNN(nn.Module):
             hop_decay: lambda in [0.6, 0.95], decay for far-hop mixing in tap buffer
             sigma_pi_orders: list of orders T, e.g. [0,1] for 1st+2nd order (recommended)
             use_resonator: legacy fallback (deprecated)
+            binding_type: "circular" (FFT-based circular convolution, default) or
+                          "hadamard" (elementwise multiplication — preserves geometry better)
         '''
 
         super(GraphCNN, self).__init__()
@@ -42,6 +44,9 @@ class GraphCNN(nn.Module):
         self.resonator_beta = resonator_beta
         self.hop_decay = hop_decay if use_reservoir else 1.0
         self.sigma_pi_orders = sigma_pi_orders if sigma_pi_orders is not None else [0, 1]
+        if binding_type not in ("circular", "hadamard"):
+            raise ValueError(f"binding_type must be 'circular' or 'hadamard', got {binding_type!r}")
+        self.binding_type = binding_type
 
         if self.edge_feat_dim > 0:
             g = torch.Generator().manual_seed(rng_seed)
@@ -175,18 +180,21 @@ class GraphCNN(nn.Module):
         return matrix
     
     def bind(self, x, y, eps=1e-8):
-        # Perform FFT on each hypervector in the tensors
-        fft_self = fft(x, dim=1)
-        fft_other = fft(y, dim=1)
-
-        # Multiply element-wise in the frequency domain
-        product = torch.mul(fft_self, fft_other)
-
-        # Perform inverse FFT to get back to the spatial domain
-        result = ifft(product, dim=1)
-
-        # Real part, then L2-normalize per row (standard VSA practice after binding)
-        result = torch.real(result)
+        """
+        VSA binding operator. Two modes selected at construction time via binding_type:
+          'circular'  — circular convolution via FFT (default; equivalent to HRR binding).
+                        Produces a near-random direction, maximally dissimilar to inputs.
+          'hadamard'  — elementwise multiplication (MAP / FHRR-style).
+                        Stays close to both inputs; preserves cluster geometry better.
+        Both outputs are L2-normalised so norms stay unit after binding.
+        """
+        if self.binding_type == "hadamard":
+            result = x * y
+        else:
+            fft_self = fft(x, dim=1)
+            fft_other = fft(y, dim=1)
+            product = torch.mul(fft_self, fft_other)
+            result = torch.real(ifft(product, dim=1))
         return F.normalize(result, p=2, dim=1, eps=eps)
 
     def permute_hv(self, x, shift=1):

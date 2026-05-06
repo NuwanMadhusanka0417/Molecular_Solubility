@@ -1,0 +1,91 @@
+6th may 2026
+
+Step1.
+Concrete fixes that usually help (any one of these will produce a visible improvement in B–E):
+    1. Replace circular convolution with hadamard binding
+    2. Run with delta=0 (no bind in the residual): bundled = pooled_nb + h. Far less scrambling.
+    3. Or weight the residual: h_new = norm(α·h + (1−α)·bind(h, pooled_nb)) with α ≈ 0.7–0.8 (currently α=0.5 implicitly).
+    4. Or use fewer message passing steps (2 or 3 instead of 4) — the t-SNE clearly says layers 3 and 4 add noise.
+
+
+Step 2
+    hop_decay=0.85 is too large given that deeper layers are noisier
+
+    With weights [1.0, 0.85, 0.72, 0.61, 0.52] the tap buffer is essentially a near-uniform sum of layers. Since panels B–E are noisier than A, this means layers 1–4 dilute layer 0's clustering when summed. That's why panel G is barely better than panel A.
+
+Step 3
+    rotating h in GVFA equation and doesn't reverce. that is a issue.
+
+Step 4
+    Reduce num_layers from 5 → 3. Panels B and C should look much like A (instead of degrading like D and E currently).
+
+
+Manual - I commented rolling of h vector in each layer
+
+1. Replace circular convolution with hadamard binding
+2. Run with delta=0 (no bind in the residual): bundled = pooled_nb + h. Far less scrambling.
+3. weight the residual: h_new = norm(α·h + (1−α)·bind(h, pooled_nb)) with α ≈ 0.7–0.8 (currently α=0.5 implicitly).
+4. use fewer message passing steps (2 or 3 instead of 4) — the t-SNE clearly says layers 3 and 4 add noise.
+5. hop_decay=0.85 is too large given that deeper layers are noisier. try weights [1.0, 0.85, 0.72, 0.61, 0.52] the tap buffer
+
+
+===========================================================================
+Extended plan — actions to push toward best results (short)
+===========================================================================
+
+A. MP-operator (Panels B–E) — pick the variant that survives layers
+   6. Make residual weight α a CLI flag; sweep α ∈ {0.5, 0.7, 0.8, 0.9}.
+   7. Sweep num_layers ∈ {2, 3, 4} × delta ∈ {0, 1} × bind ∈ {fft, hadamard}.
+   8. Replace sum-aggregation with degree-normalised (mean) edge messages
+      to stop high-degree atoms dominating after a few hops.
+   9. Optional: skip-connection variant h_new = norm(h + γ·Δ), γ small (0.2–0.3),
+      so deeper layers add a controlled refinement instead of a 50/50 rewrite.
+
+B. Tap buffer (Panel G)
+   10. Make hop_decay a CLI flag; sweep ∈ {0.3, 0.4, 0.5, 0.6, 0.85}.
+   11. Try learnable (or grid-searched) per-hop weights w_k instead of λ^k.
+   12. Drop the per-hop ρ^k roll for a sanity run — confirm it isn't hurting
+       clustering by spreading info across mostly-empty slots.
+
+C. Sigma-Pi (Panel H)
+   13. Compare --sigma_pi {0}, {0,1}, {0,1,2} on a held-out fold; keep the
+       order set that improves Ridge R² (not the t-SNE — Π is for the head).
+   14. L2-normalise each *_t term BEFORE summing (already done) but also
+       store/use them as separate concatenated channels for Ridge
+       ([F1 | *_1 | *_2]) — gives Ridge per-order weights.
+
+D. Pooling (Panel I) and head input
+   15. Fix the double-size-normalisation in src/embeddings.py: when
+       use_reservoir=True, skip the extra /sqrt(N) (multi_stat_pool already
+       returns means).
+   16. Try multi_stat_pool variants: [mean | max | std], [mean | max], or
+       weighted-by-Gasteiger-charge mean. Pick by 5-fold CV.
+   17. Feed Ridge the per-stage concat: [F1 | F_v | mean | max | mean_sq]
+       so it can choose which stage matters per dimension.
+
+E. Regression head
+   18. Keep RidgeCV as baseline; also benchmark KernelRidge(rbf) and a small
+       MLP head (2 layers, 256 units) — VSA features often respond well to
+       a non-linear head.
+   19. Standardise (zero-mean, unit-var) the embedding before Ridge — current
+       code feeds raw HV stats which can hurt α-search.
+
+F. Diagnostics (do these alongside every sweep)
+   20. Add a "B′" t-SNE panel with delta=0 (no bind) to confirm Issue 1.
+   21. In tsne_viz.py, mean-pool → multi-stat-pool for panels A–H so they
+       reflect what Ridge sees.
+   22. Plot per-stage class-separation score (silhouette or kNN logS-class
+       accuracy) so we can compare runs numerically, not just visually.
+   23. Log per-stage HV norm mean/std and inter-class cosine — quick health
+       check that bind isn't collapsing magnitudes.
+
+G. Reproducibility / scope
+   24. Remove the hard-coded train_data[200:400] slice in GVFA_edge_main.py
+       once experiments stabilise; rerun best config on full train set with
+       seeds 0–9 and report mean ± std.
+   25. Lock the chosen recipe in nci_commands.txt as a single canonical
+       command (dim, sigma_pi, num_layers, hop_decay, α, delta, head).
+
+Suggested run order (fast → slow):
+   F-20, F-21  →  A-7 (small grid)  →  B-10  →  C-13  →  D-15/D-16
+   →  E-18 (head sweep)  →  F-22 (numerical scoreboard)  →  G-24 (final).

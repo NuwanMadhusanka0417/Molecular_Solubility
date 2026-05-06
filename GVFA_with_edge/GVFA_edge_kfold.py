@@ -127,7 +127,7 @@ def run_gvfa_ridge_train_test(args, train_data, test_data, device):
                 test_HVs[0].node_features.shape[1], 5, 1, 'sum', 'sum', device, 10,
                 edge_feat_dim=5, edge_projection_type="orthogonal",
                 use_reservoir=True, hop_decay=0.85, sigma_pi_orders=sigma_pi_orders,
-                rng_seed=seed,
+                rng_seed=seed, binding_type=args.binding,
             )
             _eref = next((g.edge_attr for g in train_HVs if g.edge_attr is not None and g.edge_attr.numel() > 0), None)
             if _eref is not None:
@@ -267,7 +267,7 @@ def run_gvfa_ridge_one_split(args, train_data, eval_data, device, fold_label="")
                 eval_HVs[0].node_features.shape[1], 5, 1, 'sum', 'sum', device, 10,
                 edge_feat_dim=5, edge_projection_type="orthogonal",
                 use_reservoir=True, hop_decay=0.85, sigma_pi_orders=sigma_pi_orders,
-                rng_seed=seed,
+                rng_seed=seed, binding_type=args.binding,
             )
             _eref = next((g.edge_attr for g in train_HVs if g.edge_attr is not None and g.edge_attr.numel() > 0), None)
             if _eref is not None:
@@ -400,6 +400,16 @@ def parse_args():
     p.add_argument(
         '--test_csv', type=str, default='final_data/testset_novel.csv',
         help='Test CSV (SMILES, logS) for evaluation after k-fold (full-train model).',
+    )
+    p.add_argument(
+        '--binding',
+        type=str,
+        default='circular',
+        choices=['circular', 'hadamard'],
+        help=(
+            'VSA binding operator. "circular" = FFT circular convolution (default). '
+            '"hadamard" = elementwise multiplication (preserves geometry better).'
+        ),
     )
     p.add_argument(
         '--no_test', action='store_true',
