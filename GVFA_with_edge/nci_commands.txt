@@ -41,3 +41,19 @@ python tsne_hv_pipeline.py --split test
 python GVFA_edge_main.py --dataset solubility_novel --dim 1000 --sigma_pi 0,1 --tsne --tsne_split test --tsne_max_mols 500 --tsne_out_dir tsne_plots
 python GVFA_edge_main.py --dataset solubility_novel --dim 1000 --sigma_pi 0,1 --save_results results --tsne --tsne_split both --tsne_out_dir tsne_plots
 python GVFA_edge_main.py --dataset solubility_novel --dim 1000 --sigma_pi 0,1 --tsne --tsne_split test --tsne_max_mols 0
+
+
+# Default — circular convolution (FFT, original behaviour)
+python GVFA_edge_main.py --dim 1000 --sigma_pi 0,1
+# Hadamard binding — preserves geometry, expect cleaner B-E panels in t-SNE
+python GVFA_edge_main.py --dim 1000 --sigma_pi 0,1 --binding hadamard --tsne --tsne_split both --tsne_out_dir tsne_plots_hadamard
+
+python -W ignore GVFA_edge_main.py --dim 2000 --sigma_pi 0,1 --binding hadamard --seeds 0,1,2,3,4 --delta 0 --equation 10
+
+
+# Normal run — zero change
+python GVFA_edge_main.py --dim 1000 --sigma_pi 0,1
+# Both regressions, printed side-by-side
+python GVFA_edge_main.py --dim 1000 --sigma_pi 0,1 --gvfa_ridge
+# Both regressions, results saved to CSV
+python GVFA_edge_main.py --dim 1000 --sigma_pi all --gvfa_ridge --save_results results/

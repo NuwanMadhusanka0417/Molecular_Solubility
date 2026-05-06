@@ -19,6 +19,7 @@ from src.tsne_viz import draw_tsne_pipeline
 from models.graphcnnVSA_Binding_FULL import GraphCNN, EDGE_MINMAX_COLS
 
 import torch
+import torch.nn.functional as F
 import numpy as np
 from scipy.stats import pearsonr
 from sklearn.linear_model import RidgeCV
@@ -51,6 +52,58 @@ def compute_metrics(y_true, y_pred):
         "pearson_r2": pr ** 2,
         "pearson_r": pr,
     }
+
+
+def _mean_pool_layers(node_mat: torch.Tensor, start_idx: list) -> np.ndarray:
+    """Mean-pool node-level [N_total, D] tensor to graph-level [G, D] array."""
+    rows = []
+    for i in range(len(start_idx) - 1):
+        lo, hi = start_idx[i], start_idx[i + 1]
+        rows.append(node_mat[lo:hi].mean(dim=0))
+    return torch.stack(rows).numpy().astype(np.float32)
+
+
+@torch.no_grad()
+def get_gvfa_layer_embedding(model, graphs, device):
+    """
+    Build a [G, 5*D] embedding by concatenating mean-pooled node HVs from all
+    5 GNN layers (layer 0 = VSA projection + L2-norm, layers 1-4 = message passing).
+
+    Uses capture_aux=True — does not affect model weights.
+    Layer 0 is reconstructed from g.node_features BEFORE the forward pass
+    (the forward does not modify node_features in-place).
+
+    Returns
+    -------
+    emb    : np.ndarray [G, 5*D]
+    labels : np.ndarray [G]
+    """
+    labels = np.array(
+        [float(torch.as_tensor(g.label).item()) for g in graphs],
+        dtype=np.float32,
+    )
+
+    # Reconstruct layer 0 (same ops as GraphCNN.forward) before the forward pass
+    X_cat = torch.cat([g.node_features for g in graphs], dim=0).to(device)
+    X_concat = F.normalize(X_cat, p=2, dim=1, eps=1e-8).cpu()   # [N_total, D]
+
+    model.eval()
+    _ = model(graphs, capture_aux=True)
+
+    aux = model._aux
+    if aux is None:
+        raise RuntimeError(
+            "model._aux is None. Make sure the model was built with use_reservoir=True."
+        )
+
+    start_idx = aux["start_idx"]          # list[int], length G+1
+    post_bins = aux["layer_post_bin"]     # list of 4 tensors [N_total, D]
+
+    all_layers = [X_concat] + [p.cpu() for p in post_bins]   # 5 tensors
+    pooled     = [_mean_pool_layers(lyr, start_idx) for lyr in all_layers]
+    emb        = np.concatenate(pooled, axis=1)               # [G, 5*D]
+
+    return emb, labels
 
 
 @torch.no_grad()
@@ -129,6 +182,15 @@ def parse_args():
         '--export_analysis_dir', type=str, default=None,
         help='If set, save per-batch .npz files: GVFA layer pre/post L2-normalization HV, '
              'sigma-pi per order + combined, F1 tap buffer, y (logS), and node graph ids.',
+    )
+    p.add_argument(
+        '--gvfa_ridge',
+        action='store_true',
+        default=False,
+        help='If set, run a second Ridge regression using only the concatenated '
+             'GNN layer outputs (layers 0-4, before tap buffer / Sigma-Pi / graph '
+             'pooling). Results are printed and saved alongside the main results. '
+             'The original regression is always run regardless of this flag.',
     )
     p.add_argument(
         '--tsne',
@@ -338,6 +400,9 @@ def run_gvfa_ridge(args, train_data, test_data, device,
                     dim=dim,
                     sigma_tag=sigma_tag,
                 )
+            orders_str = ','.join(str(x) for x in sigma_pi_orders)
+            reg_tag    = args.ridge_type if args.use_ridge else 'xgboost'
+
             train_emb, train_labels = getEmbedding(
                 model_eq1, device, train_HVs, use_size_aware=True, hop_alpha=1.0,
             )
@@ -345,7 +410,72 @@ def run_gvfa_ridge(args, train_data, test_data, device,
                 model_eq1, device, test_HVs, use_size_aware=True, hop_alpha=1.0,
             )
             train_emb = train_emb.squeeze(0)
-            test_emb = test_emb.squeeze(0)
+            test_emb  = test_emb.squeeze(0)
+
+            # ── Optional GVFA-layer-only regression ──────────────────────────
+            if args.gvfa_ridge:
+                gvfa_train_emb, gvfa_train_labels = get_gvfa_layer_embedding(
+                    model_eq1, train_HVs, device,
+                )
+                gvfa_test_emb, gvfa_test_labels = get_gvfa_layer_embedding(
+                    model_eq1, test_HVs, device,
+                )
+
+                if args.ridge_type == 'ridgecv':
+                    gvfa_reg = RidgeCV(
+                        alphas=np.logspace(-2, 4, 100),
+                        cv=5,
+                        scoring='neg_mean_squared_error',
+                    )
+                else:
+                    gvfa_reg = GridSearchCV(
+                        KernelRidge(kernel='rbf'),
+                        {'alpha': np.logspace(-4, 4, 40), 'gamma': np.logspace(-6, 2, 25)},
+                        cv=5, scoring='neg_mean_squared_error', n_jobs=-1, refit=True,
+                    )
+
+                gvfa_reg.fit(gvfa_train_emb, gvfa_train_labels)
+                gvfa_pred = gvfa_reg.predict(gvfa_test_emb)
+                gvfa_m    = compute_metrics(gvfa_test_labels, gvfa_pred)
+
+                print(
+                    f"[GVFA-layers] Dim={dim}  sigma_pi=[{orders_str}]  ({sigma_tag})  "
+                    f"head={reg_tag}  emb_dim={gvfa_train_emb.shape[1]}  "
+                    f"RMSE={gvfa_m['rmse']:.4f}  STD_err={gvfa_m['std_err']:.4f}  "
+                    f"MAE={gvfa_m['mae']:.4f}  R2_COD={gvfa_m['r2_cod']:.4f}  "
+                    f"Pearson_R2={gvfa_m['pearson_r2']:.4f}",
+                )
+
+                if save:
+                    gvfa_pred_path = os.path.join(
+                        args.save_results,
+                        f'predictions_gvfalayers_dim{dim}_{sigma_tag}_{reg_tag}.csv',
+                    )
+                    with open(gvfa_pred_path, 'w', newline='') as f:
+                        w = csv.writer(f)
+                        w.writerow(['y_true', 'y_pred', 'error'])
+                        for yt, yp in zip(
+                            np.asarray(gvfa_test_labels).ravel(),
+                            np.asarray(gvfa_pred).ravel(),
+                        ):
+                            w.writerow([f'{yt:.6f}', f'{yp:.6f}', f'{yt - yp:.6f}'])
+
+                    with open(summary_path, 'a', newline='') as f:
+                        csv.DictWriter(f, fieldnames=summary_fields).writerow({
+                            'dim':        dim,
+                            'sigma_pi':   f'[{orders_str}]',
+                            'sigma_tag':  sigma_tag,
+                            'seed':       seed,
+                            'regressor':  f'gvfalayers_{reg_tag}',
+                            'RMSE':       f'{gvfa_m["rmse"]:.6f}',
+                            'STD_err':    f'{gvfa_m["std_err"]:.6f}',
+                            'MAE':        f'{gvfa_m["mae"]:.6f}',
+                            'R2_COD':     f'{gvfa_m["r2_cod"]:.6f}',
+                            'Pearson_R2': f'{gvfa_m["pearson_r2"]:.6f}',
+                            'Pearson_R':  f'{gvfa_m["pearson_r"]:.6f}',
+                        })
+                    print(f"  [GVFA-layers] Saved predictions to {gvfa_pred_path}")
+            # ── End GVFA-layer-only regression ───────────────────────────────
 
             if args.use_ridge:
                 if args.ridge_type == 'ridgecv':
@@ -383,8 +513,6 @@ def run_gvfa_ridge(args, train_data, test_data, device,
                 pred = reg.predict(test_emb)
 
             m = compute_metrics(test_labels, pred)
-            orders_str = ','.join(str(x) for x in sigma_pi_orders)
-            reg_tag = args.ridge_type if args.use_ridge else 'xgboost'
             print(
                 f"Dim={dim}  sigma_pi=[{orders_str}]  ({sigma_tag})  head={reg_tag}  "
                 f"RMSE={m['rmse']:.4f}  STD_err={m['std_err']:.4f}  MAE={m['mae']:.4f}  "
