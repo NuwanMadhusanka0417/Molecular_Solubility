@@ -129,7 +129,8 @@ def precompute_graphs(data, cache_path=None):
 
 
 def build_embeddings_fast(graphs, original_features, dim, seed,
-                          sigma_pi_orders, device, binding_type="circular"):
+                          sigma_pi_orders, device, binding_type="circular",
+                          delta=1, equation=10):
     """
     Project cached graphs and extract embeddings.  Skips create_graph_list
     and neighbor-building entirely — only does the cheap projection + encoder.
@@ -137,6 +138,8 @@ def build_embeddings_fast(graphs, original_features, dim, seed,
     graphs:            pre-computed graph list (from precompute_graphs)
     original_features: list of [N_i, F_node] tensors (saved once before loop)
     binding_type:      'circular' (FFT) or 'hadamard' (elementwise)
+    delta:             residual mixing mode (0, 1, or 2)
+    equation:          message-passing variant (10, 11, or 12)
     """
     set_all_seeds(seed)
 
@@ -151,7 +154,7 @@ def build_embeddings_fast(graphs, original_features, dim, seed,
         torch.cuda.manual_seed_all(seed)
 
     encoder = GraphCNN(
-        dim, 5, 1, 'sum', 'sum', device, 10,
+        dim, 5, delta, 'sum', 'sum', device, equation,
         edge_feat_dim=5, edge_projection_type="orthogonal",
         use_reservoir=True, hop_decay=0.85, sigma_pi_orders=sigma_pi_orders,
         rng_seed=seed, binding_type=binding_type,
@@ -193,6 +196,30 @@ def parse_args():
         help=(
             'VSA binding operator. "circular" = FFT circular convolution (default). '
             '"hadamard" = elementwise multiplication (preserves geometry better).'
+        ),
+    )
+    p.add_argument(
+        '--delta',
+        type=int,
+        default=1,
+        choices=[0, 1, 2],
+        help=(
+            'Residual mixing mode in next_layer_eps. '
+            '0 = h + pooled_nb (no bind). '
+            '1 = h + bind(h, pooled_nb) (default). '
+            '2 = h + bind(h, pooled_nb) + pooled_nb.'
+        ),
+    )
+    p.add_argument(
+        '--equation',
+        type=int,
+        default=10,
+        choices=[10, 11, 12],
+        help=(
+            'Message-passing equation variant. '
+            '10 = rotate h before neighbour-pool, no final rotate (default). '
+            '11 = no pre-rotate, rotate output. '
+            '12 = rotate h before pool AND rotate output.'
         ),
     )
     return p.parse_args()
@@ -314,10 +341,12 @@ def main():
                 tr_emb, tr_labels = build_embeddings_fast(
                     train_graphs, train_orig_feats, dim, seed,
                     sigma_pi_orders, device, binding_type=args.binding,
+                    delta=args.delta, equation=args.equation,
                 )
                 va_emb, va_labels = build_embeddings_fast(
                     val_graphs, val_orig_feats, dim, seed,
                     sigma_pi_orders, device, binding_type=args.binding,
+                    delta=args.delta, equation=args.equation,
                 )
 
                 reg = RidgeCV(
@@ -394,10 +423,12 @@ def main():
     full_emb, full_labels = build_embeddings_fast(
         full_train_graphs, full_train_orig_feats, best_dim, best_seed,
         best_sigma_orders, device, binding_type=args.binding,
+        delta=args.delta, equation=args.equation,
     )
     test_emb, test_labels = build_embeddings_fast(
         test_graphs, test_orig_feats, best_dim, best_seed,
         best_sigma_orders, device, binding_type=args.binding,
+        delta=args.delta, equation=args.equation,
     )
 
     reg_final = RidgeCV(
@@ -471,10 +502,12 @@ def main():
         fe, fl = build_embeddings_fast(
             full_train_graphs, full_train_orig_feats, r_dim, r_seed,
             r_sigma_orders, device, binding_type=args.binding,
+            delta=args.delta, equation=args.equation,
         )
         te, tl = build_embeddings_fast(
             test_graphs, test_orig_feats, r_dim, r_seed,
             r_sigma_orders, device, binding_type=args.binding,
+            delta=args.delta, equation=args.equation,
         )
         reg_k = RidgeCV(
             alphas=np.logspace(-4, 2, 50), cv=5,

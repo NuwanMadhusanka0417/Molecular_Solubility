@@ -124,7 +124,7 @@ def run_gvfa_ridge_train_test(args, train_data, test_data, device):
                 torch.cuda.manual_seed_all(seed)
 
             model_eq1 = GraphCNN(
-                test_HVs[0].node_features.shape[1], 5, 1, 'sum', 'sum', device, 10,
+                test_HVs[0].node_features.shape[1], 5, args.delta, 'sum', 'sum', device, args.equation,
                 edge_feat_dim=5, edge_projection_type="orthogonal",
                 use_reservoir=True, hop_decay=0.85, sigma_pi_orders=sigma_pi_orders,
                 rng_seed=seed, binding_type=args.binding,
@@ -264,7 +264,7 @@ def run_gvfa_ridge_one_split(args, train_data, eval_data, device, fold_label="")
                 torch.cuda.manual_seed_all(seed)
 
             model_eq1 = GraphCNN(
-                eval_HVs[0].node_features.shape[1], 5, 1, 'sum', 'sum', device, 10,
+                eval_HVs[0].node_features.shape[1], 5, args.delta, 'sum', 'sum', device, args.equation,
                 edge_feat_dim=5, edge_projection_type="orthogonal",
                 use_reservoir=True, hop_decay=0.85, sigma_pi_orders=sigma_pi_orders,
                 rng_seed=seed, binding_type=args.binding,
@@ -409,6 +409,30 @@ def parse_args():
         help=(
             'VSA binding operator. "circular" = FFT circular convolution (default). '
             '"hadamard" = elementwise multiplication (preserves geometry better).'
+        ),
+    )
+    p.add_argument(
+        '--delta',
+        type=int,
+        default=1,
+        choices=[0, 1, 2],
+        help=(
+            'Residual mixing mode in next_layer_eps. '
+            '0 = h + pooled_nb (no bind). '
+            '1 = h + bind(h, pooled_nb) (default). '
+            '2 = h + bind(h, pooled_nb) + pooled_nb.'
+        ),
+    )
+    p.add_argument(
+        '--equation',
+        type=int,
+        default=10,
+        choices=[10, 11, 12],
+        help=(
+            'Message-passing equation variant. '
+            '10 = rotate h before neighbour-pool, no final rotate (default). '
+            '11 = no pre-rotate, rotate output. '
+            '12 = rotate h before pool AND rotate output.'
         ),
     )
     p.add_argument(

@@ -173,6 +173,30 @@ def parse_args():
             '"hadamard" = elementwise multiplication (MAP-style, preserves geometry better).'
         ),
     )
+    p.add_argument(
+        '--delta',
+        type=int,
+        default=1,
+        choices=[0, 1, 2],
+        help=(
+            'Residual mixing mode in next_layer_eps. '
+            '0 = h + pooled_nb (no bind, least scrambling). '
+            '1 = h + bind(h, pooled_nb) (default). '
+            '2 = h + bind(h, pooled_nb) + pooled_nb.'
+        ),
+    )
+    p.add_argument(
+        '--equation',
+        type=int,
+        default=10,
+        choices=[10, 11, 12],
+        help=(
+            'Message-passing equation variant. '
+            '10 = rotate h before neighbour-pool, no final rotate (default). '
+            '11 = no pre-rotate, rotate output. '
+            '12 = rotate h before pool AND rotate output.'
+        ),
+    )
     return p.parse_args()
 
 
@@ -268,7 +292,7 @@ def run_gvfa_ridge(args, train_data, test_data, device,
                 torch.cuda.manual_seed_all(seed)
 
             model_eq1 = GraphCNN(
-                test_HVs[0].node_features.shape[1], 5, 0, 'sum', 'sum', device, 11,
+                test_HVs[0].node_features.shape[1], 5, args.delta, 'sum', 'sum', device, args.equation,
                 edge_feat_dim=5, edge_projection_type="orthogonal",
                 use_reservoir=True, hop_decay=0.85, sigma_pi_orders=sigma_pi_orders,
                 rng_seed=seed, binding_type=args.binding,
@@ -423,7 +447,7 @@ def main():
     print(f"Seeds: {seeds}")
 
     train_data, test_data = load_data(dataset=args.dataset, seed=seeds[0])
-    train_data, test_data = train_data[200:400], test_data
+    # train_data, test_data = train_data[200:400], test_data
     print("Building graph objects (ETKDGv3 conformers)...")
     train_graphs_base = create_graph_list(train_data)
     test_graphs_base = create_graph_list(test_data)
