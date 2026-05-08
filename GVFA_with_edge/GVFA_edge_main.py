@@ -109,6 +109,12 @@ def parse_args():
         help='Sigma-Pi order sets per --dims value. Presets: "all" = [0],[1],[2],[0,1],[0,1,2]; '
              '"legacy" = [0,1] only. Or one set as comma-separated orders, e.g. "0,1,2".',
     )
+    p.add_argument('--num_layers', type=int, default=4,
+                   help='Number of GVFA layers passed to GraphCNN (default: 5)')
+    p.add_argument('--delta', type=int, default=1,
+                   help='Delta parameter passed to GraphCNN (default: 1)')
+    p.add_argument('--equation', type=int, default=10,
+                   help='Equation parameter passed to GraphCNN (default: 10)')
     p.add_argument(
         '--save_results', type=str, default=None,
         help='If set, save CSV files (summary + per-molecule predictions) to this directory.',
@@ -192,7 +198,8 @@ def run_gvfa_ridge(args, train_data, test_data, device):
                 torch.cuda.manual_seed_all(seed)
 
             model_eq1 = GraphCNN(
-                test_HVs[0].node_features.shape[1], 5, 1, 'sum', 'sum', device, 10,
+                test_HVs[0].node_features.shape[1], args.num_layers, args.delta,
+                'sum', 'sum', device, args.equation,
                 edge_feat_dim=5, edge_projection_type="orthogonal",
                 use_reservoir=True, hop_decay=0.85, sigma_pi_orders=sigma_pi_orders,
                 rng_seed=seed,
