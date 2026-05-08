@@ -280,6 +280,7 @@ def run_gvfa_ridge(args, train_data, test_data, device):
 # ---------------------------------------------------------------------------
 
 def main():
+    print("norm1_5"
     args = parse_args()
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
