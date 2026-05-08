@@ -14,6 +14,7 @@ from src.create_graphs import create_graph_list
 from src.load_data import load_data
 from src.VSA_conversion import VSA_conversion
 from src.embeddings import getEmbedding
+from src.feature_scaler import MolecularFeatureScaler
 from models.graphcnnVSA_Binding_FULL import GraphCNN
 
 import torch
@@ -109,6 +110,9 @@ def parse_args():
         help='Sigma-Pi order sets per --dims value. Presets: "all" = [0],[1],[2],[0,1],[0,1,2]; '
              '"legacy" = [0,1] only. Or one set as comma-separated orders, e.g. "0,1,2".',
     )
+    p.add_argument('--normalize', action='store_true', default=False,
+                   help='Standardize node/edge features before VSA projection '
+                        '(fit on train only, applied to both splits).')
     p.add_argument('--num_layers', type=int, default=4,
                    help='Number of GVFA layers passed to GraphCNN (default: 5)')
     p.add_argument('--delta', type=int, default=1,
@@ -185,6 +189,16 @@ def run_gvfa_ridge(args, train_data, test_data, device):
 
         train_graphs = create_graph_list(train_data)
         test_graphs = create_graph_list(test_data)
+
+        if args.normalize:
+            scaler = MolecularFeatureScaler()
+            scaler.fit(train_graphs)
+            scaler.transform(train_graphs)
+            scaler.transform(test_graphs)
+            if dim == dims[0]:
+                print("[normalize] Feature scaler fitted on training set.")
+                scaler.summary()
+
         test_HVs = VSA_conversion(
             test_graphs.copy(), dim, projection_type="orthogonal", seed=seed,
         )
