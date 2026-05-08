@@ -19,10 +19,12 @@ ssh -o "ServerAliveInterval 60" -o "ServerAliveCountMax 6" cdac@10.142.44.26
 python GVFA_edge_seed_sweep.py --seeds 0-49 --dims 2000 --sigma_pi legacy --top_k 10
 
 python GVFA_edge_seed_sweep.py --seeds 0,1,42,123 --dims 2000,5000 --sigma_pi legacy
-python GVFA_edge_main.py --seeds 4,5,9,10,12,13,15,16,20,22 --dims 2000 --sigma_pi "0,1"
+python GVFA_edge_main.py --seeds 0,1,2,3,4 --dims 2000 --sigma_pi "0,1"
 
 # 5-fold on full training set, one GVFA seed
 python GVFA_edge_kfold.py --k 5 --dims 2000 --sigma_pi legacy --seed 42
 
 # 10-fold, multiple seeds
 python GVFA_edge_kfold.py --k 10 --dims 1000,2000 --sigma_pi legacy --seeds 0,1,42
+
+python GVFA_edge_main.py --num_layers 4 --delta 0 --equation 10 --dims "2000" --seeds 0,1,2,3,4 --sigma_pi "0,1"
