@@ -192,7 +192,7 @@ def run_gvfa_ridge(args, train_data, test_data, device):
                 torch.cuda.manual_seed_all(seed)
 
             model_eq1 = GraphCNN(
-                test_HVs[0].node_features.shape[1], 5, 1, 'sum', 'sum', device, 10,
+                test_HVs[0].node_features.shape[1], 4, 0, 'sum', 'sum', device, 10,
                 edge_feat_dim=5, edge_projection_type="orthogonal",
                 use_reservoir=True, hop_decay=0.85, sigma_pi_orders=sigma_pi_orders,
                 rng_seed=seed,
