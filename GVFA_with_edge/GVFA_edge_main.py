@@ -222,8 +222,12 @@ def run_gvfa_ridge(args, train_data, test_data, device):
 
             m = compute_metrics(test_labels, pred)
             orders_str = ','.join(str(x) for x in sigma_pi_orders)
+            alpha_part = ''
+            if args.use_ridge:
+                best_alpha = float(np.asarray(reg.alpha_).ravel()[0])
+                alpha_part = f"  Ridge_alpha={best_alpha:.6g}"
             print(
-                f"Dim={dim}  sigma_pi=[{orders_str}]  ({sigma_tag})  "
+                f"Dim={dim}  sigma_pi=[{orders_str}]  ({sigma_tag}){alpha_part}  "
                 f"RMSE={m['rmse']:.4f}  STD_err={m['std_err']:.4f}  MAE={m['mae']:.4f}  "
                 f"R2_COD={m['r2_cod']:.4f}  Pearson_R2={m['pearson_r2']:.4f}",
             )
