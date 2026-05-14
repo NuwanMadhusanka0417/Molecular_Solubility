@@ -118,6 +118,10 @@ def parse_args():
         help='If set, save per-batch .npz files: GVFA layer pre/post binarization HV, '
              'sigma-pi per order + combined, F1 tap buffer, y (logS), and node graph ids.',
     )
+    p.add_argument(
+        '--hop_decay', type=float, default=0.85,
+        help='Hop decay factor for the GVFA reservoir (default: 0.85).',
+    )
     return p.parse_args()
 
 
@@ -194,7 +198,7 @@ def run_gvfa_ridge(args, train_data, test_data, device):
             model_eq1 = GraphCNN(
                 test_HVs[0].node_features.shape[1], 4, 0, 'sum', 'sum', device, 10,
                 edge_feat_dim=5, edge_projection_type="orthogonal",
-                use_reservoir=True, hop_decay=0.85, sigma_pi_orders=sigma_pi_orders,
+                use_reservoir=True, hop_decay=args.hop_decay, sigma_pi_orders=sigma_pi_orders,
                 rng_seed=seed,
             )
             train_emb, train_labels = getEmbedding(
