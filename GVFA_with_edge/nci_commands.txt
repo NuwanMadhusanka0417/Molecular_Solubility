@@ -1,7 +1,7 @@
 nci
 Madh@0417
 
-qsub -I  -l walltime=12:00:00,mem=18GB,ncpus=7,jobfs=5GB -P mi23 -l storage=gdata/jq77+scratch/jq77+scratch/mi23
+qsub -I  -l walltime=15:00:00,mem=20GB,ncpus=7,jobfs=5GB -P mi23 -l storage=gdata/jq77+scratch/jq77+scratch/mi23
 
 . /scratch/jq77/nk8155/env1/bin/activate
 
@@ -48,4 +48,4 @@ python GVFA_edge_main.py --seeds 0,1,2,3,4 --dims 5000 --sigma_pi "0,1" --hop_de
 python GVFA_edge_table_4.py --dataset_dir datasets/
 
 # Or with custom dimension
-python GVFA_edge_table_4.py --seeds "0,1,2,3,4" --dims="1000,2000,5000,10000"
+python GVFA_edge_table_4.py -W ignore --seeds "0,1,2,3,4" --dims="2000,5000,10000"
