@@ -6,18 +6,22 @@ USe "sol" python environment
 
 from src.create_graphs import create_graph_list
 from src.load_data import load_data
-from src.VSA_conversion import VSA_conversion
 from src.embeddings import getEmbedding
 from models.graphcnnVSA_Binding_FULL import GraphCNN
 import torch
 from xgboost import XGBRegressor
 import numpy as np
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from scipy.stats import pearsonr
 from src.VSA_conversion import VSA_conversion, make_random_projection, project_node_features_with_W
 import math
 
 
-train_data, test_data = load_data()
+train_data, test_data = load_data(
+    dataset="solubility_novel",
+    train_path="final_data/solubility_1.csv",
+    test_path="final_data/testset_novel.csv",
+)
 
 
 train_graphs = create_graph_list(train_data)
@@ -33,7 +37,7 @@ neighbor_pooling_type = 'sum' # sum, average, max
 device = 1  # help='if delta is 1 will be the model with binding, if 0 model will have be without binding (default: 1)'
 device = torch.device('cpu')
 
-dims = [1000, 2000, 5000, 10000]
+dims = [2000, 5000, 10000]
 
 for dim in dims:
     train_graphs = create_graph_list(train_data)
@@ -41,12 +45,12 @@ for dim in dims:
     ts_graph = test_graphs.copy()
     tr_graph = train_graphs.copy()
 
-    train_graphs  = VSA_conversion(ts_graph, dim)
-    test_graphs   = VSA_conversion(tr_graph, dim)
+    train_graphs  = VSA_conversion(tr_graph, dim)
+    test_graphs   = VSA_conversion(ts_graph, dim)
 
     # create W ONCE per HV_dim
     F_in = train_graphs[0].node_features.shape[1]
-    W = make_random_projection(F_in, dim, seed=42, device="cpu")
+    W = make_random_projection(F_in, dim, seed=0, device="cpu")
 
     # apply SAME W to train and test
     train_graphs = project_node_features_with_W(train_graphs, W)
@@ -89,14 +93,15 @@ for dim in dims:
     # )
     xgb.fit(train_embeddings_eq1.numpy(), train_labels_eq1.numpy())
 
-    # ---------- Evaluate ----------
-    # pred = xgb.predict(test_embeddings_eq1)
+    # ---------- Evaluate on test set ----------
+    y_true = test_labels_eq1.numpy().ravel()
     pred = xgb.predict(test_embeddings_eq1.numpy())
-    rmse = mean_squared_error(test_labels_eq1, pred)
-    mae  = mean_absolute_error(test_labels_eq1, pred)
-    r2   = r2_score(test_labels_eq1, pred)
+    mae = mean_absolute_error(y_true, pred)
+    rmse = math.sqrt(mean_squared_error(y_true, pred))
+    r2 = r2_score(y_true, pred)
+    pearson_r, _ = pearsonr(y_true, pred)
 
-    print(f"Dimention,{dim},MAE,{mae},RMSE,{rmse},R2,{r2}")
+    print(f"Dimension {dim} | MAE {mae:.4f} | RMSE {rmse:.4f} | Pearson r {pearson_r:.4f} | R2 {r2:.4f}")
 
     del xgb
     del train_embeddings_eq1
@@ -104,5 +109,3 @@ for dim in dims:
     del test_labels_eq1
     del train_labels_eq1
     del model_eq1
-    del test_HVs
-    del train_HVs

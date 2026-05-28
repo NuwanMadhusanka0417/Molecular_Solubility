@@ -54,12 +54,15 @@ def VSA_conversion(g_list, new_dim=None):
 
         # Compute max degree
         degree_list = [len(g.neighbors[i]) for i in range(len(g.g))]
-        g.max_neighbor = max(degree_list)
+        g.max_neighbor = max(degree_list) if degree_list else 0
 
-        # Create edge matrix
+        # Create edge matrix (undirected: both directions); allow zero-edge graphs
         edges = [list(pair) for pair in g.g.edges()]
-        edges.extend([[j, i] for i, j in edges])
-        g.edge_mat = torch.LongTensor(edges).transpose(0, 1)
+        if edges:
+            edges.extend([[j, i] for i, j in edges])
+            g.edge_mat = torch.LongTensor(edges).transpose(0, 1)
+        else:
+            g.edge_mat = torch.empty((2, 0), dtype=torch.long)
 
     #Extracting unique tag labels
     # tagset = set([])

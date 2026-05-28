@@ -200,7 +200,7 @@ def build_edge_features_geognn_for_atom_graph(data, mol):
     edge_attr = np.stack(edge_feats, axis=0)  # [E, 4]
     return torch.from_numpy(edge_attr)
 
-def expand_atomic_features(data, mol):
+def expand_atomic_features(data, mol, use_edge_features=False):
     index_to_atomic_number = {0: 6, 1: 8, 2: 7, 3: 16, 4: 9}  
     num_nodes = data.x.shape[0]
 
@@ -210,13 +210,13 @@ def expand_atomic_features(data, mol):
     # print("Atiomic numbers ", atomic_numbers)
     # print("data.edge_index -  ", data.edge_index)
 
-    # Compute degree (number of bonds)
+    # Degree from RDKit bonds (node-only; do not rely on PyG edge_index / edge features)
     degrees = torch.zeros((num_nodes, 1))
-    for i in range(data.edge_index.shape[1]):
-        u, v = data.edge_index[:, i]
+    for bond in mol.GetBonds():
+        u = bond.GetBeginAtomIdx()
+        v = bond.GetEndAtomIdx()
         degrees[u] += 1
         degrees[v] += 1
-    # print("degrees ", degrees)
 
     # Additional atomic properties
     valence_electrons = torch.zeros((num_nodes, 1))
@@ -393,31 +393,6 @@ def expand_atomic_features(data, mol):
                 chirality[i, 0] = 0.0
                 chirality[i, 1] = 1.0   # S
 
-    # ================== NEW: edge features → node features ==================
-    edge_attr = build_edge_features_geognn_for_atom_graph(data, mol)  # [E, 4] or None
-
-    if edge_attr is not None:
-        num_nodes = data.x.shape[0]
-        num_edges, edge_feat_dim = edge_attr.shape
-
-        node_edge_sum = torch.zeros((num_nodes, edge_feat_dim),
-                                    dtype=edge_attr.dtype)
-
-        for e in range(num_edges):
-            u, v = data.edge_index[:, e]
-            feat = edge_attr[e]
-            node_edge_sum[u] += feat
-            node_edge_sum[v] += feat
-
-        # mean over incident bonds; atoms with degree 0 just stay zeros
-        node_edge_mean = node_edge_sum / degrees.clamp(min=1.0)  # [N, 4]
-    else:
-        node_edge_mean = torch.zeros((num_nodes, 4), dtype=torch.float32)
-    # =======================================================================
-
-
-
-    
     enhanced_features = torch.cat((atomic_numbers, 
                                    degrees, 
                                    valence_electrons, 
@@ -510,18 +485,39 @@ def pyg_graph_to_mol(data):
     return mol
 
 
-def create_graph_list(dataset):
-  g_list = []
-  for data in dataset:
-    mol = pyg_graph_to_mol(data)
+def _mol_from_data(data):
+    """RDKit mol with correct topology; prefer SMILES over PyG edge_index."""
+    smi = getattr(data, "smiles", None)
+    if smi:
+        mol = Chem.MolFromSmiles(smi)
+        if mol is not None:
+            return mol
+    return pyg_graph_to_mol(data)
 
-    node_features = expand_atomic_features(data, mol)
+
+def create_graph_list(dataset, use_edge_features=False):
+  """Build S2VGraph list from a PyG dataset. Node features only by default."""
+  g_list = []
+  smiles_list = getattr(dataset, "smiles_list", None)
+  for idx, data in enumerate(dataset):
+    smi = smiles_list[idx] if smiles_list is not None else getattr(data, "smiles", None)
+    if smi:
+        mol = Chem.MolFromSmiles(smi)
+    else:
+        mol = _mol_from_data(data)
+    if mol is None:
+        continue
+
+    node_features = expand_atomic_features(data, mol, use_edge_features=use_edge_features)
     # print("create_g_list : W ", node_features.shape)
     # edge_index = data.edge_index
     # edge_features = data.edge_attr #get_edge_index_and_features(mol)
     # graph = Data(x=node_features, edge_index=edge_index, edge_attr=edge_features)
 
     g, node_tags = create_nodetags(mol)
-    g_list.append(S2VGraph(g = g, label= data.y, mol= mol, node_tags= node_tags, node_features=torch.tensor(node_features, dtype=torch.float32)))
+    g_list.append(S2VGraph(
+        g=g, label=data.y, mol=mol, node_tags=node_tags,
+        node_features=torch.as_tensor(node_features, dtype=torch.float32),
+    ))
     # break
   return g_list
