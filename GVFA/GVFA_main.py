@@ -50,7 +50,7 @@ for dim in dims:
 
     # create W ONCE per HV_dim
     F_in = train_graphs[0].node_features.shape[1]
-    W = make_random_projection(F_in, dim, seed=0, device="cpu")
+    W = make_random_projection(F_in, dim, seed=3, device="cpu")
 
     # apply SAME W to train and test
     train_graphs = project_node_features_with_W(train_graphs, W)
