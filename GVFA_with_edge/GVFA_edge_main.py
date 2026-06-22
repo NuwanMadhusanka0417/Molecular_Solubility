@@ -122,6 +122,14 @@ def parse_args():
         '--hop_decay', type=float, default=0.85,
         help='Hop decay factor for the GVFA reservoir (default: 0.85).',
     )
+    p.add_argument(
+        '--static_pool', action='store_true', default=True,
+        help='Use static multi-stat pooling: [mean | max | mean_sq] concatenated (3D). Default: on.',
+    )
+    p.add_argument(
+        '--no_static_pool', action='store_false', dest='static_pool',
+        help='Use simple superposition (sum pooling) instead of static multi-stat pooling.',
+    )
     return p.parse_args()
 
 
@@ -168,7 +176,7 @@ def run_gvfa_ridge(args, train_data, test_data, device):
         os.makedirs(args.save_results, exist_ok=True)
         summary_path = os.path.join(args.save_results, 'results_summary.csv')
         summary_fields = [
-            'dim', 'sigma_pi', 'sigma_tag', 'seed',
+            'dim', 'sigma_pi', 'sigma_tag', 'seed', 'static_pool',
             'RMSE', 'STD_err', 'MAE', 'R2_COD', 'Pearson_R2', 'Pearson_R',
         ]
         with open(summary_path, 'w', newline='') as f:
@@ -199,7 +207,7 @@ def run_gvfa_ridge(args, train_data, test_data, device):
                 test_HVs[0].node_features.shape[1], 4, 0, 'sum', 'sum', device, 10,
                 edge_feat_dim=5, edge_projection_type="orthogonal",
                 use_reservoir=True, hop_decay=args.hop_decay, sigma_pi_orders=sigma_pi_orders,
-                rng_seed=seed,
+                rng_seed=seed, use_static_pool=args.static_pool,
             )
             train_emb, train_labels = getEmbedding(
                 model_eq1, device, train_HVs, use_size_aware=True, hop_alpha=1.0,
@@ -230,8 +238,9 @@ def run_gvfa_ridge(args, train_data, test_data, device):
             if args.use_ridge:
                 best_alpha = float(np.asarray(reg.alpha_).ravel()[0])
                 alpha_part = f"  Ridge_alpha={best_alpha:.6g}"
+            pool_tag = 'static_pool' if args.static_pool else 'superposition'
             print(
-                f"Dim={dim}  sigma_pi=[{orders_str}]  ({sigma_tag}){alpha_part}  "
+                f"Dim={dim}  sigma_pi=[{orders_str}]  ({sigma_tag})  pool={pool_tag}{alpha_part}  "
                 f"RMSE={m['rmse']:.4f}  STD_err={m['std_err']:.4f}  MAE={m['mae']:.4f}  "
                 f"R2_COD={m['r2_cod']:.4f}  Pearson_R2={m['pearson_r2']:.4f}",
             )
@@ -254,6 +263,7 @@ def run_gvfa_ridge(args, train_data, test_data, device):
                         'sigma_pi': f'[{orders_str}]',
                         'sigma_tag': sigma_tag,
                         'seed': seed,
+                        'static_pool': args.static_pool,
                         'RMSE': f'{m["rmse"]:.6f}',
                         'STD_err': f'{m["std_err"]:.6f}',
                         'MAE': f'{m["mae"]:.6f}',
