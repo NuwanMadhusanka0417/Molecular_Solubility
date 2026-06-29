@@ -1,0 +1,36 @@
+[project]
+name = "hyper_fingerprints"
+version = "0.2.2"
+description = "Hyperdimensional molecular fingerprints using Vector Symbolic Architectures"
+requires-python = ">=3.9"
+license = "MIT"
+dependencies = [
+    "numpy>=1.24",
+    "rdkit>=2024.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "bump-my-version",
+    "nox",
+    "pytest>=7.0",
+    "pytest-cov",
+]
+
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[tool.maturin]
+module-name = "hyper_fingerprints._core"
+
+[tool.bumpversion]
+current_version = "0.2.2"
+commit = false
+tag = false
+
+[[tool.bumpversion.files]]
+filename = "hyper_fingerprints/VERSION"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
