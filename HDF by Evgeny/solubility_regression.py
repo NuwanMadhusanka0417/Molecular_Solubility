@@ -2,9 +2,11 @@
 Solubility (logS) regression using Hyperdimensional Fingerprints (HDF).
 
 Pipeline per seed:
-  1. Encode train/test SMILES into HDF fingerprints (numpy backend).
-  2. Fit RidgeCV on train fingerprints -> logS.
-  3. Predict on the test set, report RMSE and R2.
+  1. Build an atom-type vocabulary (symbol -> index) from train + test mols.
+  2. Encode train/test SMILES into HDF fingerprints (numpy backend).
+  3. Fit a downstream regressor on train fingerprints -> logS.
+     Ridge/SVR use StandardScaler fit on train only, then applied to test.
+  4. Predict on the test set, report RMSE and R2.
 
 The HDF `seed` controls the random fingerprint codebook, so seeds 0..4 give
 5 independent fingerprint initialisations. The train/test split is fixed by
@@ -30,11 +32,12 @@ from xgboost import XGBRegressor
 # Use the local hyper_fingerprints package (numpy backend, no Rust needed).
 sys.path.insert(0, ".")
 from hyper_fingerprints import Encoder  # noqa: E402
+from hyper_fingerprints.features import atom_type_map  # noqa: E402
 
 RDLogger.DisableLog("rdApp.*")  # silence RDKit parse warnings
 
-TRAIN_CSV = r"C:\Users\22390013@students.ltu.edu.au\OneDrive - LA TROBE UNIVERSITY\Projects\Molecular_Solubility\MolecularSolubility\GVFA_with_edge\final_data\solubility_1.csv"
-TEST_CSV = r"C:\Users\22390013@students.ltu.edu.au\OneDrive - LA TROBE UNIVERSITY\Projects\Molecular_Solubility\MolecularSolubility\GVFA_with_edge\final_data\testset_novel.csv"
+TRAIN_CSV = r"..\GVFA_with_edge\final_data\solubility_1.csv"
+TEST_CSV = r"..\GVFA_with_edge\final_data\testset_novel.csv"
 
 SEEDS = [0, 1, 2, 3, 4]
 DIMENSION = 2000 #1024
@@ -69,22 +72,59 @@ def collect_atom_types(*mol_lists: list[Chem.Mol]) -> list[str]:
     return sorted(symbols)
 
 
-def encode_mols(encoder: Encoder, mols: list[Chem.Mol]) -> np.ndarray:
+def validate_atom_vocabulary(
+    mols: list[Chem.Mol], atom_to_idx: dict[str, int], label: str
+) -> None:
+    """Ensure every atom in *mols* has a dictionary entry before encoding."""
+    missing: set[str] = set()
+    for mol in mols:
+        for atom in mol.GetAtoms():
+            sym = atom.GetSymbol()
+            if sym not in atom_to_idx:
+                missing.add(sym)
+    if missing:
+        raise ValueError(
+            f"{label}: unsupported atom symbols {sorted(missing)}; "
+            f"vocabulary has {len(atom_to_idx)} types"
+        )
+
+
+def encode_mols(
+    encoder: Encoder, mols: list[Chem.Mol], *, joint: bool = False
+) -> np.ndarray:
     """Encode a list of RDKit mols into fingerprints, in mini-batches."""
+    encode_fn = encoder.encode_joint if joint else encoder.encode
     chunks = []
     for i in range(0, len(mols), BATCH_SIZE):
-        chunks.append(encoder.encode(mols[i : i + BATCH_SIZE]))
-    return np.vstack(chunks)
+        chunks.append(encode_fn(mols[i : i + BATCH_SIZE]))
+    X = np.vstack(chunks)
+    if not np.isfinite(X).all():
+        bad = int((~np.isfinite(X)).sum())
+        raise ValueError(f"Non-finite values in fingerprints ({bad} entries)")
+    return X
+
+
+def model_needs_scaling(model: str, scale: bool) -> bool:
+    """Linear / kernel models benefit from train-fit feature standardization."""
+    if model == "xgb":
+        return False
+    return scale
 
 
 def build_regressor(model: str, scale: bool, seed: int):
     """Build the selected regressor, optionally with StandardScaler scaling.
 
+    When scaling is enabled, sklearn's Pipeline fits StandardScaler on the
+    training matrix only; test predictions reuse those train statistics.
+
     model : "ridge" | "svr" | "xgb"
     """
     if model == "ridge":
         reg = RidgeCV(
-            alphas=np.logspace(-4, 2, 50), cv=5, scoring="neg_mean_squared_error"
+            alphas=np.logspace(-6, 4, 80),
+            cv=5,
+            scoring="neg_mean_squared_error",
+            fit_intercept=True,
         )
     elif model == "svr":
         reg = SVR(kernel="rbf", C=10.0, epsilon=0.1, gamma="scale")
@@ -101,8 +141,11 @@ def build_regressor(model: str, scale: bool, seed: int):
     else:
         raise ValueError(f"Unknown model: {model!r}")
 
-    if scale:
-        return make_pipeline(StandardScaler(), reg)
+    if model_needs_scaling(model, scale):
+        return make_pipeline(
+            StandardScaler(with_mean=True, with_std=True),
+            reg,
+        )
     return reg
 
 
@@ -134,13 +177,27 @@ def main() -> None:
         "--no-scale",
         dest="scale",
         action="store_false",
-        help="Disable feature scaling; fit RidgeCV on raw fingerprints.",
+        help="Disable StandardScaler for ridge/svr (not recommended).",
+    )
+    parser.add_argument(
+        "--joint",
+        action="store_true",
+        help="Use encode_joint (order-0 + order-N concatenation, 2x dim).",
     )
     parser.set_defaults(scale=True)
     args = parser.parse_args()
 
     print(f"Model: {args.model}")
-    print(f"Feature scaling: {'ON (StandardScaler)' if args.scale else 'OFF'}")
+    scale_note = (
+        "ON for ridge/svr (train-fit, test-apply)"
+        if args.scale
+        else "OFF for ridge/svr"
+    )
+    print(f"Feature scaling: {scale_note}; xgb never scaled")
+    if args.joint:
+        print(f"Fingerprint mode: joint (2 x {DIMENSION} = {2 * DIMENSION} dims)")
+    else:
+        print(f"Fingerprint mode: graph embedding ({DIMENSION} dims)")
     print("Loading datasets...")
     train_mols, y_train, train_dropped = load_dataset(TRAIN_CSV)
     test_mols, y_test, test_dropped = load_dataset(TEST_CSV)
@@ -148,7 +205,10 @@ def main() -> None:
     print(f"  test : {len(test_mols)} molecules ({test_dropped} dropped)")
 
     atom_types = collect_atom_types(train_mols, test_mols)
+    atom_to_idx = atom_type_map(atom_types)
     print(f"  atom vocabulary ({len(atom_types)}): {atom_types}")
+    validate_atom_vocabulary(train_mols, atom_to_idx, "train")
+    validate_atom_vocabulary(test_mols, atom_to_idx, "test")
 
     models = ["ridge", "svr", "xgb"] if args.model == "all" else [args.model]
     # results[model] -> list of (seed, rmse, r2)
@@ -163,21 +223,29 @@ def main() -> None:
             seed=seed,
             backend="numpy",
         )
-        X_train = encode_mols(encoder, train_mols)
-        X_test = encode_mols(encoder, test_mols)
-        print(f"  seed {seed}: encoded in {time.time() - t_enc:.1f}s")
+        X_train = encode_mols(encoder, train_mols, joint=args.joint)
+        X_test = encode_mols(encoder, test_mols, joint=args.joint)
+        print(
+            f"  seed {seed}: encoded {X_train.shape[1]}-dim fingerprints "
+            f"in {time.time() - t_enc:.1f}s"
+        )
 
         for m in models:
             t0 = time.time()
             reg = build_regressor(m, args.scale, seed)
             reg.fit(X_train, y_train)
+            y_pred_train = reg.predict(X_train)
             y_pred = reg.predict(X_test)
 
+            train_rmse = float(np.sqrt(mean_squared_error(y_train, y_pred_train)))
             rmse = float(np.sqrt(mean_squared_error(y_test, y_pred)))
             r2 = float(r2_score(y_test, y_pred))
             results[m].append((seed, rmse, r2))
+            scaled = model_needs_scaling(m, args.scale)
             print(
-                f"    [{m}] RMSE={rmse:.4f}  R2={r2:.4f}  "
+                f"    [{m}] test RMSE={rmse:.4f}  R2={r2:.4f}  "
+                f"train RMSE={train_rmse:.4f}  "
+                f"scale={'yes' if scaled else 'no'}  "
                 f"({model_info(m, reg)}, {time.time() - t0:.1f}s)"
             )
 
