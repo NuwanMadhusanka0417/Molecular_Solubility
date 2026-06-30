@@ -18,7 +18,7 @@ from __future__ import annotations
 import argparse
 import sys
 import time
-
+import os
 import numpy as np
 import pandas as pd
 from rdkit import Chem, RDLogger
@@ -36,8 +36,9 @@ from hyper_fingerprints.features import atom_type_map  # noqa: E402
 
 RDLogger.DisableLog("rdApp.*")  # silence RDKit parse warnings
 
-TRAIN_CSV = r"..\GVFA_with_edge\final_data\solubility_1.csv"
-TEST_CSV = r"..\GVFA_with_edge\final_data\testset_novel.csv"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+TRAIN_CSV = os.path.join(BASE_DIR, "..","GVFA_with_edge", "final_data", "solubility_1.csv")
+TEST_CSV = os.path.join(BASE_DIR, "..", "GVFA_with_edge","final_data", "testset_novel.csv")
 
 SEEDS = [0, 1, 2, 3, 4]
 DIMENSION = 2000 #1024
