@@ -1,11 +1,11 @@
 nci
 Madh@0417
 
-qsub -I  -l walltime=15:00:00,mem=20GB,ncpus=7,jobfs=5GB -P qw14 -l storage=gdata/jq77+scratch/jq77+scratch/mi23
+qsub -I  -l walltime=15:00:00,mem=100GB,ncpus=7,jobfs=20GB -P mi23 -l storage=gdata/jq77+scratch/jq77+scratch/mi23
 
 qw14
 
-. /scratch/jq77/nk8155/env1/bin/activate
+. /scratch/jq77/nk8155/env2/bin/activate
 
 module load python3/3.8.5
 
