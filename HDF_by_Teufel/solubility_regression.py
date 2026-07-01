@@ -20,12 +20,12 @@ from sklearn.svm import SVR
 from xgboost import XGBRegressor
 
 
-TRAIN_CSV = "data/solubility_1.csv"
-TEST_CSV = "data/testset_novel.csv"
+TRAIN_CSV = "data/final_unique_train.csv" #"data/solubility_1.csv"
+TEST_CSV = "data/final_unique_test.csv" #"data/testset_novel.csv"
 TARGET_COL = "logS"
 SMILES_COL = "SMILES"
 SEEDS = [0, 1, 2, 3, 4]
-DIMENSIONS = [100, 120]
+DIMENSIONS = [1000, 2000, 5000, 10000]
 
 _process = psutil.Process()
 
