@@ -1,4 +1,4 @@
-,C_ID,Name,InChIKey,SMILES,CAS,LogS,smiles_canon
+,C_ID,Name,InChIKey,SMILES,CAS,logS,smiles_canon
 0,A-51,,BOCJQSFSGAZAPQ-UHFFFAOYSA-N,Clc1c2C(=O)c3c(C(=O)c2ccc1)cccc3,,-5.54,O=C1c2ccccc2C(=O)c2c(Cl)cccc21
 1,A-53,,BRBKOPJOKNSWSG-UHFFFAOYSA-N,S(=O)(=O)(N=C(N)N)c1ccc(N)cc1,,-1.98497,NC(N)=NS(=O)(=O)c1ccc(N)cc1
 2,A-55,,BRPOVUNVTUCYNN-UHFFFAOYSA-N,Fc1c(N2C(CC)C(N)C2)cc2n(C3CC3)cc(C(=O)O)c(=O)c2c1,,-3.912,CCC1C(N)CN1c1cc2c(cc1F)c(=O)c(C(=O)O)cn2C1CC1

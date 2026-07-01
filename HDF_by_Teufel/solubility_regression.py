@@ -14,7 +14,7 @@ import pandas as pd
 
 from hyper_fingerprints import Encoder
 from sklearn.linear_model import RidgeCV
-from sklearn.metrics import mean_squared_error, r2_score
+from sklearn.metrics import mean_squared_error, r2_score. mean_absolute_error
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVR
 from xgboost import XGBRegressor
@@ -128,10 +128,11 @@ for dim in DIMENSIONS:
             pred = model.predict(X_test_s)
 
             rmse = float(np.sqrt(mean_squared_error(y_test, pred)))
+            mae = mean_absolute_error(y_test, pred)
             r2 = r2_score(y_test, pred)
             all_results.append((dim, seed, name, rmse, r2))
             print(f"{name:10s} dim={dim} seed={seed}  "
-                  f"RMSE={rmse:.4f}  R2={r2:.4f}  "
+                  f"MAE={mae:.4f}  RMSE={rmse:.4f}  R2={r2:.4f}  "
                   f"[mem] {peak_mem_gb():.2f} GB")
 
             # fitted model may hold references to training data
