@@ -8,7 +8,7 @@ Usage:
 """
 
 import gc
-import resource
+import psutil
 import numpy as np
 import pandas as pd
 
@@ -27,10 +27,18 @@ SMILES_COL = "SMILES"
 SEEDS = [0, 1, 2, 3, 4]
 DIMENSIONS = [100, 120]
 
+_process = psutil.Process()
+
 
 def peak_mem_gb():
-    """Peak RSS so far, in GB (Linux: ru_maxrss is in KB)."""
-    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024 ** 2)
+    """Current RSS memory usage of this process, in GB.
+
+    Note: unlike resource.getrusage's ru_maxrss, this is the CURRENT
+    RSS, not the historical peak. It still works fine for step-by-step
+    tracing since we print after every stage, but if you want the true
+    peak, take the max of all printed values yourself.
+    """
+    return _process.memory_info().rss / (1024 ** 3)
 
 
 def load_dataset(csv_path):
